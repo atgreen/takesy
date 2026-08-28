@@ -13,7 +13,7 @@
   (:local-nicknames (#:egl #:green-screen/egl)
                     (#:kf  #:green-screen/keyframe))
   (:export #:bringup-test #:texture-1to1-test #:zoom-crop-test
-           #:compose-test #:compose-reduction-check
+           #:compose-test #:compose-reduction-check #:compose-shadow-test
            #:compile-shader #:make-program #:make-fullscreen-quad
            #:make-texture-rgba #:draw-textured-quad #:draw-zoom #:draw-compose
            #:make-test-pattern #:make-gradient-pattern))
@@ -344,10 +344,12 @@ out vec4 frag;
 uniform sampler2D tex;
 uniform float u_zoom;
 uniform vec2  u_center;    // pre-clamped focal point, source UV
-uniform vec2  u_canvas;    // output size in px (W,H)
-uniform float u_padding;   // inset margin, fraction of min(W,H)
-uniform float u_corner;    // rounded-rect radius, fraction of min(content dim)
-uniform vec3  u_bg;        // background colour
+uniform vec2  u_canvas;       // output size in px (W,H)
+uniform float u_padding;      // inset margin, fraction of min(W,H)
+uniform float u_corner;       // rounded-rect radius, fraction of min(content dim)
+uniform vec3  u_bg;           // background colour
+uniform float u_shadow_blur;  // shadow softness, fraction of min(W,H); 0 = none
+uniform float u_shadow_alpha; // shadow peak opacity 0..1
 
 // Signed distance to a rounded box centred at origin, half-size b, radius r.
 float sd_round_box(vec2 p, vec2 b, float r) {
@@ -370,7 +372,20 @@ void main() {
   vec2  cuv = (P - lo) / sz;                       // UV within the inset rect
   vec2  suv = u_center + (cuv - vec2(0.5)) / u_zoom;
   vec3  screen = texture(tex, suv).rgb;
-  frag = vec4(mix(u_bg, screen, ins), 1.0);
+
+  // Soft drop shadow: an offset, blurred copy of the same rounded rect, behind
+  // the content. +P.y is image-down (see draw-compose), so the shadow drops
+  // downward. Layer order: background -> shadow -> content.
+  float blurPx = u_shadow_blur * min(u_canvas.x, u_canvas.y);
+  float sh = 0.0;
+  if (blurPx > 0.0 && u_shadow_alpha > 0.0) {
+    vec2  soff = vec2(0.0, 0.35 * blurPx);
+    float dsh  = sd_round_box(P - ctr - soff, b, r);
+    sh = 1.0 - smoothstep(0.0, blurPx, dsh);
+  }
+  vec3 col = mix(u_bg, vec3(0.0), u_shadow_alpha * sh);
+  col      = mix(col, screen, ins);
+  frag = vec4(col, 1.0);
 }")
 
 (defun draw-compose (program vao tex frame canvas-w canvas-h)
@@ -388,6 +403,8 @@ padding + circular corners)."
       (let ((l (uni "u_canvas")))  (when (>= l 0) (gl:uniformf l (float canvas-w 1.0) (float canvas-h 1.0))))
       (let ((l (uni "u_padding"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-padding frame) 1.0))))
       (let ((l (uni "u_corner")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-corner-radius frame) 1.0))))
+      (let ((l (uni "u_shadow_blur")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-shadow-blur frame) 1.0))))
+      (let ((l (uni "u_shadow_alpha"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-shadow-alpha frame) 1.0))))
       (let ((l (uni "u_bg")))
         (when (>= l 0)
           (destructuring-bind (r g b) (kf:keyframe-bg-color frame)
@@ -455,4 +472,58 @@ Structural check: all four canvas corners (in the padding) must be background."
               (when (< ok 4)
                 (error "M4: only ~D/4 canvas corners are background" ok))))
           (format t "  [m4] composite OK~%")
+          path)))))
+
+;;; ------------------------------------------------------------------
+;;; M5 (7k8.5): soft drop shadow. Handled by the same +fs-compose+ pass (a second
+;;; offset/blurred rounded-box SDF behind the content). Orientation note: readback
+;;; is bottom-origin and we save without flipping, so image-down = increasing P.y
+;;; in the shader; the shadow offset is +P.y (drops downward in the final image).
+
+(defun compose-shadow-test (&key (width 320) (height 200)
+                                 (zoom 1.4) (padding 0.10) (corner 0.12)
+                                 (bg '(0.55 0.57 0.62))
+                                 (shadow-blur 0.06) (shadow-alpha 0.55)
+                                 (path "/tmp/gs-m5-shadow.png"))
+  "M5: render with a soft drop shadow on a light background so the shadow is
+visible, then assert (a) a point in the shadow band just below the inset is
+darker than the background, and (b) the top-left canvas corner is still clean bg."
+  (let* ((src   (make-gradient-pattern width height))
+         (frame (kf:make-keyframe :zoom zoom :padding padding :corner-radius corner
+                                  :bg-color bg :shadow-blur shadow-blur
+                                  :shadow-alpha shadow-alpha)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let ((program (make-program +vs-passthrough+ +fs-compose+))
+            (vao     (make-fullscreen-quad))
+            (tex     (make-texture-rgba src width height)))
+        (gl:clear-color 0.0 0.0 0.0 1.0)
+        (gl:clear :color-buffer-bit)
+        (draw-compose program vao tex frame width height)
+        (gl:finish)
+        (let* ((out    (read-rgba width height))
+               (bg8    (mapcar (lambda (c) (round (* 255 c))) bg))
+               (m      (* padding (min width height)))
+               (blurpx (* shadow-blur (min width height))))
+          (save-rgba-png out width height path)
+          (flet ((px (r c) (let ((i (* 4 (+ (* r width) c))))
+                             (list (aref out i) (aref out (+ i 1)) (aref out (+ i 2))))))
+            ;; Shadow band: just below the inset's bottom edge (image-down = +P.y),
+            ;; horizontally centred. P.y = (H-m) + 0.5*blur -> readback row P.y-0.5.
+            (let* ((band-r (min (1- height)
+                                (round (- (+ (- height m) (* 0.5 blurpx)) 0.5))))
+                   (band-c (floor width 2))
+                   (band   (px band-r band-c))
+                   (corner (px 0 0))
+                   (band-sum (reduce #'+ band))
+                   (bg-sum   (reduce #'+ bg8)))
+              (format t "  [m5] bg=~A shadow-band@(~D,~D)=~A corner=~A~%"
+                      bg8 band-r band-c band corner)
+              (unless (< band-sum (- bg-sum 20))
+                (error "M5: shadow band ~A is not darker than bg ~A" band bg8))
+              (unless (every (lambda (x y) (<= (abs (- x y)) 3)) corner bg8)
+                (error "M5: top-left corner ~A is not clean background ~A" corner bg8))
+              (format t "  [m5] drop shadow verified (band darker, corner clean) -> ~A~%"
+                      path)))
           path)))))
