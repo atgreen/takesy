@@ -614,25 +614,100 @@ H.264 mp4 at PATH. Return (values path n-frames). WIDTH/HEIGHT even (yuv420p)."
               (write-sequence (read-rgba width height) s))))
         (%encode-raw raw width height fps path n)))))
 
+;;; ------------------------------------------------------------------
+;;; Cursor overlay (am4.9). METADATA capture hides the HW cursor, so we draw one
+;;; ourselves at the eased position, transformed through the same zoom/pan as the
+;;; content and clipped to the rounded content rect. A white SDF arrow with a
+;;; dark border, alpha-blended over the composited frame.
+
+(defparameter +fs-cursor+
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform vec2  u_canvas;
+uniform vec2  u_cursor;    // hotspot in framebuffer px
+uniform float u_size;      // arrow size in px
+uniform float u_padding;
+uniform float u_corner;
+
+float sd_tri(vec2 p, vec2 a, vec2 b, vec2 c) {
+  vec2 e0=b-a, e1=c-b, e2=a-c, v0=p-a, v1=p-b, v2=p-c;
+  vec2 pq0=v0-e0*clamp(dot(v0,e0)/dot(e0,e0),0.0,1.0);
+  vec2 pq1=v1-e1*clamp(dot(v1,e1)/dot(e1,e1),0.0,1.0);
+  vec2 pq2=v2-e2*clamp(dot(v2,e2)/dot(e2,e2),0.0,1.0);
+  float s=sign(e0.x*e2.y-e0.y*e2.x);
+  vec2 d=min(min(vec2(dot(pq0,pq0), s*(v0.x*e0.y-v0.y*e0.x)),
+                 vec2(dot(pq1,pq1), s*(v1.x*e1.y-v1.y*e1.x))),
+                 vec2(dot(pq2,pq2), s*(v2.x*e2.y-v2.y*e2.x)));
+  return -sqrt(d.x)*sign(d.y);
+}
+float sd_round_box(vec2 p, vec2 b, float r) {
+  vec2 q=abs(p)-b+vec2(r); return min(max(q.x,q.y),0.0)+length(max(q,0.0))-r;
+}
+void main() {
+  vec2 P = v_uv * u_canvas;
+  float m = u_padding * min(u_canvas.x, u_canvas.y);
+  vec2 lo=vec2(m), hi=u_canvas-vec2(m), sz=hi-lo, ctr=0.5*(lo+hi);
+  if (sd_round_box(P-ctr, 0.5*sz, u_corner*min(sz.x,sz.y)) > 0.0) discard;
+  // arrow: tip at hotspot, body toward +x/+y (image right/down)
+  vec2 L = (P - u_cursor) / u_size;
+  float d  = sd_tri(L, vec2(0.0,0.0), vec2(0.0,1.0), vec2(0.62,0.62));
+  float aa = fwidth(d) + 1e-5;
+  float a  = 1.0 - smoothstep(0.0, aa, d);            // alpha: inside the arrow
+  vec3  col = mix(vec3(0.05), vec3(1.0), step(0.09, -d)); // dark border, white fill
+  frag = vec4(col, a);
+}")
+
+(defun cursor-output-px (cursor-uv keyframe out-w out-h)
+  "Map a cursor source-UV (cons u . v) through KEYFRAME's zoom/pan/padding to a
+framebuffer pixel position. Return (values px py visible-p) -- visible-p is nil
+when the cursor falls outside the zoomed content view."
+  (let* ((ec (kf:effective-center keyframe))
+         (z  (kf:keyframe-zoom keyframe))
+         (m  (* (kf:keyframe-padding keyframe) (min out-w out-h)))
+         (sx (- out-w (* 2 m))) (sy (- out-h (* 2 m)))
+         (cuvx (+ 0.5 (* (- (car cursor-uv) (car ec)) z)))
+         (cuvy (+ 0.5 (* (- (cdr cursor-uv) (cdr ec)) z))))
+    (values (+ m (* cuvx sx)) (+ m (* cuvy sy))
+            (and (<= 0.0 cuvx 1.0) (<= 0.0 cuvy 1.0)))))
+
+(defun draw-cursor (program vao px py size keyframe out-w out-h)
+  (gl:use-program program)
+  (flet ((uni (n) (gl:get-uniform-location program n)))
+    (let ((l (uni "u_canvas")))  (when (>= l 0) (gl:uniformf l (float out-w 1.0) (float out-h 1.0))))
+    (let ((l (uni "u_cursor")))  (when (>= l 0) (gl:uniformf l (float px 1.0) (float py 1.0))))
+    (let ((l (uni "u_size")))    (when (>= l 0) (gl:uniformf l (float size 1.0))))
+    (let ((l (uni "u_padding"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-padding keyframe) 1.0))))
+    (let ((l (uni "u_corner")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-corner-radius keyframe) 1.0)))))
+  (gl:enable :blend)
+  (gl:blend-func :src-alpha :one-minus-src-alpha)
+  (gl:bind-vertex-array vao)
+  (gl:draw-arrays :triangle-strip 0 4)
+  (gl:disable :blend))
+
 (defun render-frame-sequence (keyframes frame-fn n-frames out-w out-h
                               &key (fps 30) (source-format :rgba)
                                    (source-width out-w) (source-height out-h)
-                                   (time-fn nil)
+                                   (time-fn nil) (cursor-fn nil)
                                    (path "/tmp/takesy-seq.mp4"))
   "Render a real per-frame video into an OUT-W x OUT-H canvas. FRAME-FN is
 (i) -> a SOURCE-WIDTH x SOURCE-HEIGHT byte vector in SOURCE-FORMAT (:rgba or
 captured :bgra) for output frame I; the source (texture) size is decoupled from
 the output size, so a 3840x2400 capture can render to a small canvas. The compose
 shader is driven by KEYFRAMES sampled at (TIME-FN i) seconds, or i/FPS if TIME-FN
-is nil. The texture is uploaded once and updated in place each frame."
+is nil. CURSOR-FN, if given, is (i) -> (cons u . v) source-UV of the (eased)
+cursor for frame I, or nil to draw none; it is transformed through the frame's
+zoom and drawn as an overlay. The texture is uploaded once and updated each frame."
   (let ((raw (format nil "~A.raw" path)))
     (egl:with-headless-gl (ctx out-w out-h)
       (declare (ignore ctx))
       (make-fbo out-w out-h)
-      (let* ((program (make-program +vs-passthrough+ +fs-compose+))
-             (vao     (make-fullscreen-quad))
-             (tex     (make-texture-rgba (funcall frame-fn 0) source-width source-height
-                                         :source-format source-format :filter :linear)))
+      (let* ((program  (make-program +vs-passthrough+ +fs-compose+))
+             (curs-prog (when cursor-fn (make-program +vs-passthrough+ +fs-cursor+)))
+             (vao      (make-fullscreen-quad))
+             (tex      (make-texture-rgba (funcall frame-fn 0) source-width source-height
+                                          :source-format source-format :filter :linear))
+             (cur-size (* out-h 0.030)))
         (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
                                :if-exists :supersede)
           (dotimes (i n-frames)
@@ -644,6 +719,13 @@ is nil. The texture is uploaded once and updated in place each frame."
               (gl:clear-color 0.0 0.0 0.0 1.0)
               (gl:clear :color-buffer-bit)
               (draw-compose program vao tex frame out-w out-h)
+              (when curs-prog
+                (let ((cuv (funcall cursor-fn i)))
+                  (when cuv
+                    (multiple-value-bind (px py vis)
+                        (cursor-output-px cuv frame out-w out-h)
+                      (when vis
+                        (draw-cursor curs-prog vao px py cur-size frame out-w out-h))))))
               (gl:finish)
               (write-sequence (read-rgba out-w out-h) s))))
         (%encode-raw raw out-w out-h fps path n-frames)))))

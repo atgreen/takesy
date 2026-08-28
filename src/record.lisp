@@ -42,7 +42,8 @@ the first. FRAMES is a vector in ascending :time order."
     idx))
 
 (defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (scale 3)
-                                            (fps 24) (duration nil))
+                                            (fps 24) (duration nil)
+                                            (cursor-session nil))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
 stretches -- where the screencast emitted no frame -- hold the previous frame, so
@@ -57,9 +58,15 @@ compositor delivered frames. SCALE downsamples the 4K source for a sane encode."
            (sw (getf rec :width)) (sh (getf rec :height))
            (ow (* 2 (max 1 (round (/ sw scale 2)))))
            (oh (* 2 (max 1 (round (/ sh scale 2)))))
-           (cache-idx -1) (cache-bytes nil))
+           (cache-idx -1) (cache-bytes nil)
+           (cursor-fn (when cursor-session
+                        (lambda (i)
+                          (multiple-value-bind (x y)
+                              (dir:cursor-at cursor-session (/ i (float fps 1.0)))
+                            (cons (/ x (float sw 1.0)) (/ y (float sh 1.0))))))))
       (format t "  [record] compositing ~D src frames -> ~D output frames ~
-                 (~,1Fs @ ~Dfps) ~Dx~D -> ~Dx~D~%" nsrc nout dur fps sw sh ow oh)
+                 (~,1Fs @ ~Dfps) ~Dx~D -> ~Dx~D~@[ +cursor~]~%"
+              nsrc nout dur fps sw sh ow oh cursor-fn)
       (flet ((src (i)   ; nearest source frame for output time i/fps, cached
                (let ((idx (%nearest-frame-index frames (/ i (float fps 1.0)))))
                  (unless (= idx cache-idx)
@@ -71,6 +78,7 @@ compositor delivered frames. SCALE downsamples the 4K source for a sane encode."
          :fps fps :source-format :bgra
          :source-width sw :source-height sh
          :time-fn (lambda (i) (/ i (float fps 1.0)))
+         :cursor-fn cursor-fn
          :path out)))))
 
 (defun record-to-mp4 (&key (duration 4.0) (fps 24) (scale 3)
@@ -85,10 +93,14 @@ rate; static stretches hold the last frame. Return (values out n-frames)."
     (let* ((rec      (pw:record-frames fd node :duration duration
                                        :max-fps (max fps 30) :dir dir))
            (session  (recording->session rec))
-           (timeline (dir:plan-timeline session)))   ; :auto -> dwell (no events)
+           (timeline (dir:plan-timeline session))    ; :auto -> dwell (no events)
+           ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
+           ;; real cursor, so we draw a smoothed one at the tracked position.
+           (eased    (dir:make-session :width (getf rec :width) :height (getf rec :height)
+                                       :cursor (dir:ease-cursor session))))
       (format t "  [record] captured ~D frames, ~D cursor samples -> ~D keyframes~%"
               (length (getf rec :frames))
               (length (dir:session-cursor session))
               (length timeline))
       (compose-recording rec timeline :out out :scale scale
-                         :fps fps :duration duration))))
+                         :fps fps :duration duration :cursor-session eased))))
