@@ -28,6 +28,7 @@
            #:activity-segment-focus-x #:activity-segment-focus-y
            #:activity-segment-n-clicks #:activity-segment-n-keys
            #:*activity-gap* #:detect-activity
+           #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-lead* #:*zoom-tail*
            #:schedule-zooms #:plan-timeline))
 
@@ -177,6 +178,49 @@ the gap to the previous event exceeds GAP. Return them in time order."
       (nreverse segments))))
 
 ;;; ------------------------------------------------------------------
+;;; Cursor-dwell activity (no-events fallback). When we have no click/key stream
+;;; (e.g. no evdev access), infer activity from the cursor itself: stretches
+;;; where it moves slowly (dwelling on something) become activity segments
+;;; focused on where it lingered. Same activity-segment output, so the scheduler
+;;; is unchanged. Reading real evdev clicks/keys is bead green-screen-am4.2's
+;;; other half; this fallback keeps auto-zoom working without elevated perms.
+
+(defparameter *dwell-speed* 250.0
+  "Cursor speed (px/s) at or below which the pointer counts as dwelling.")
+(defparameter *dwell-min* 0.4
+  "Minimum dwell duration (s) to emit an activity segment. REPL-tunable.")
+
+(defun detect-dwell-activity (session &key (speed *dwell-speed*) (min-dwell *dwell-min*))
+  "Infer activity segments from slow (dwelling) stretches of the cursor track.
+Each qualifying dwell yields a segment focused on the mean dwell position."
+  (let ((track (session-cursor session)))
+    (when (< (length track) 2) (return-from detect-dwell-activity '()))
+    (let ((segments '()) (run '()) (run-start nil))
+      (flet ((flush (end-t)
+               (when (and run run-start (>= (- end-t run-start) min-dwell))
+                 (let* ((n  (length run))
+                        (cx (/ (reduce #'+ run :key #'cursor-sample-x) n))
+                        (cy (/ (reduce #'+ run :key #'cursor-sample-y) n)))
+                   (push (make-activity-segment
+                          :t-start run-start :t-end end-t
+                          :focus-x (float cx 1.0) :focus-y (float cy 1.0)
+                          :n-clicks 0 :n-keys 0)
+                         segments)))
+               (setf run '() run-start nil)))
+        (loop for (a b) on track while b
+              for dt = (- (cursor-sample-time b) (cursor-sample-time a))
+              for dist = (sqrt (+ (expt (- (cursor-sample-x b) (cursor-sample-x a)) 2)
+                                  (expt (- (cursor-sample-y b) (cursor-sample-y a)) 2)))
+              for spd = (if (> dt 0.0) (/ dist dt) 0.0)
+              do (if (<= spd speed)
+                     (progn
+                       (unless run-start (setf run-start (cursor-sample-time a)))
+                       (push a run))
+                     (flush (cursor-sample-time a))))
+        (flush (cursor-sample-time (car (last track)))))
+      (nreverse segments))))
+
+;;; ------------------------------------------------------------------
 ;;; Zoom scheduling. Each activity segment becomes a punch-in: ease from wide to
 ;;; a zoom centred on the segment focus shortly BEFORE it starts (LEAD), hold
 ;;; through it, then ease back to wide after an idle TAIL. Frame styling
@@ -225,14 +269,23 @@ meets the opening frame), keep the more-zoomed one so activity wins."
       (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
       (%clean-timeline (nreverse kfs)))))
 
-(defun plan-timeline (session &key (gap *activity-gap*) (zoom *zoom-level*)
+(defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
+                                   (zoom *zoom-level*)
                                    (lead *zoom-lead*) (tail *zoom-tail*)
                                    (padding 0.06) (corner 0.10)
                                    (shadow-blur 0.05) (shadow-alpha 0.5)
                                    (bg '(0.11 0.12 0.15)))
   "Full Director pass: SESSION -> activity segments -> zoom keyframe timeline
-directly renderable by the compositor's render-timeline."
-  (schedule-zooms session (detect-activity session :gap gap)
+directly renderable by the compositor's render-timeline. ACTIVITY selects the
+source: :events (clicks/keys), :dwell (cursor lingering), or :auto (events if
+the session has any, else dwell)."
+  (schedule-zooms session
+                  (ecase activity
+                    (:events (detect-activity session :gap gap))
+                    (:dwell  (detect-dwell-activity session))
+                    (:auto   (if (session-events session)
+                                 (detect-activity session :gap gap)
+                                 (detect-dwell-activity session))))
                   :zoom zoom :lead lead :tail tail
                   :padding padding :corner corner
                   :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg))
