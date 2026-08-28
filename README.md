@@ -1,95 +1,49 @@
 # takesy
 
-A Wayland-native screen recorder for Linux, in the spirit of [polished](https://screencast) —
-auto-zoom into activity, smoothed cursor motion, and a polished composited output
-(padded background, rounded corners, drop shadow). Written in Common Lisp.
+A Wayland-native screen recorder for Linux, in the spirit of
+[polished](https://screencast). It records your screen, automatically
+zooms in on wherever you're working, smooths the cursor motion, and composites a
+polished result — padded background, rounded corners, and a drop shadow — to an
+mp4.
 
-> Status: **early feasibility spike.** We are proving the capture path before building the fun parts.
+## Requirements
 
-## Architecture
+- A Linux Wayland session with `xdg-desktop-portal` (GNOME, KDE, or wlroots)
+- `ffmpeg` with an H.264 encoder (`libx264` or `libopenh264`)
+- [SBCL](https://www.sbcl.org/) and [ocicl](https://github.com/ocicl/ocicl) to
+  build (dependencies resolve automatically)
 
-The value of a polished recorder is not the capture — it's the **post-processing**.
-So the design separates the two:
-
-```
-   Wayland     ┌───────────┐  raw frames + cursor track + input events
-   session ──► │  CAPTURE  │ ───────────────────────────────────────┐
-               └───────────┘                                         │
-                                                              ┌──────▼──────┐
-                                                              │  DIRECTOR   │  pure Lisp:
-                                                              │             │  auto-zoom keyframes,
-                                                              └──────┬──────┘  cursor easing
-                                                              ┌──────▼──────┐
-                                                              │ COMPOSITOR  │  GL: zoom, background,
-                                                              └──────┬──────┘  shadow, rounded corners
-                                                                     ▼
-                                                                 ffmpeg → mp4/gif
-```
-
-### Capture (the hard, Wayland-specific part)
-
-Target: the universal **`xdg-desktop-portal` ScreenCast → PipeWire** path (works on GNOME/KDE/wlroots).
-
-1. Negotiate a screencast over D-Bus with `org.freedesktop.portal.ScreenCast`
-   (`CreateSession` → `SelectSources` → `Start`), yielding a PipeWire node id.
-2. `OpenPipeWireRemote` returns a PipeWire fd (passed via SCM_RIGHTS).
-3. Consume frames from PipeWire; read `SPA_META_Cursor` for absolute cursor position
-   in screen space (Wayland hides the global pointer position from clients — the
-   PipeWire cursor metadata is the clean way to recover it).
-
-### Libraries (from the CL ecosystem)
-
-| Role | Library | Reused / built |
-| --- | --- | --- |
-| Talk to the portal | `dbus` (death) | reused (see caveat below) |
-| PipeWire client | *hand-rolled CFFI* | **built** — no CL bindings exist |
-| DMA-BUF frame import | `cl-gbm` + `cl-egl` | reused |
-| GPU compositor | `cl-opengl`, `cl-egl` | reused |
-| Editor window / GL context | `cl-glfw3` / `glop` | reused |
-| Click/key zoom triggers | `input-event-codes` (evdev) | reused |
-| Narration audio | `cl-mixed` (PipeWire backend) | reused |
-| Encoding | shell out to `ffmpeg` | reused |
-
-**Caveat found during the spike:** the `dbus` library negotiates Unix-fd passing and parses
-the `h` type, but its `transport-unix` uses plain stream I/O with no `recvmsg`/`SCM_RIGHTS`
-ancillary handling — so it cannot retrieve the actual fd from `OpenPipeWireRemote`. That
-transport needs a small extension (tracked in beads). The handshake up to the PipeWire
-**node id** works with the library as-is.
-
-## The `takesy` CLI
-
-Build a standalone executable (bundles SBCL + all systems):
+## Build
 
 ```sh
 sbcl --script build.lisp     # produces ./takesy
 ```
 
-Record your screen — capture → auto-zoom on your activity → composite (padded
-background, rounded corners, drop shadow, eased cursor) → mp4:
+## Record
 
 ```sh
-./takesy                     # record; click GNOME's Stop button to finish
+./takesy                            # record; click Stop in the top bar to finish
 ./takesy --output demo.mp4 --duration 20
 ./takesy help
 ```
 
-Recording is the default action. Pick a source in the share dialog, do your
-thing, and click GNOME's screencast **Stop** button in the top bar to finish
-(there's a `--duration` safety cap). The cursor hides during capture (auto-zoom
-needs its position) and is restored on exit.
+Pick a source in the screen-share dialog, do your thing, then click your
+desktop's screencast **Stop** button in the top bar to finish. The cursor is
+hidden during capture (takesy needs its position to drive the auto-zoom) and is
+restored when you're done.
 
-`./takesy demo` renders the **synthetic** pipeline (no capture, no live desktop)
-— how the post-processing is validated offline.
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--output PATH` | output mp4 | `/tmp/takesy-record.mp4` |
+| `--duration S` | maximum length (a safety cap; you decide the length by clicking Stop) | 30 |
+| `--fps N` | output frame rate | 24 |
+| `--scale K` | downsample the output to 1/K of the captured resolution | 3 |
 
-## Running the capture spike
+## How it works
 
-Requires: SBCL, ocicl (deps auto-resolve), and a live Wayland session with
-`xdg-desktop-portal` (GNOME/KDE). Running it pops the desktop's "share your screen" dialog.
-
-```sh
-sbcl --script spike/run.lisp
-```
-
-## Development
-
-Work is tracked in [beads](https://github.com/steveej/beads) (`bd ready`).
+1. **Capture** — records frames and the cursor position over
+   `xdg-desktop-portal` + PipeWire.
+2. **Direct** — finds where you focused, plans smooth auto-zoom moves, and eases
+   the cursor (aiming at where you click, staying responsive when you point).
+3. **Composite** — GPU-renders the zoom, padded background, rounded corners,
+   drop shadow, and cursor overlay, then encodes to an mp4 with `ffmpeg`.
