@@ -7,7 +7,8 @@
 
 (defpackage #:takesy/cli
   (:use #:cl)
-  (:local-nicknames (#:dir #:takesy/director) (#:demo #:takesy/demo))
+  (:local-nicknames (#:dir #:takesy/director) (#:demo #:takesy/demo)
+                    (#:rec #:takesy/record))
   (:export #:main #:run))
 
 (in-package #:takesy/cli)
@@ -49,8 +50,17 @@ Signal a usage error on a malformed option."
   "takesy -- Wayland-native screen recorder (Common Lisp)
 
 Usage:
+  takesy record [options]    Capture your screen -> auto-zoom -> mp4.
   takesy demo [options]      Render the synthetic auto-zoom demo to an mp4.
   takesy help                Show this help.
+
+record options:
+  --output PATH    output mp4            (default /tmp/takesy-record.mp4)
+  --duration S     seconds to record     (default 4)
+  --fps    N       capture frames/sec    (default 12)
+  --scale  K       downsample output 1/K (default 3)
+  Pops a screen-share dialog; the cursor hides during capture (auto-zoom needs
+  its position) and is restored on exit.
 
 demo options:
   --output PATH    output mp4            (default /tmp/takesy-director.mp4)
@@ -58,8 +68,6 @@ demo options:
   --height H       render height, even   (default 300)
   --fps    N       frames per second     (default 30)
   --zoom   Z       punch-in zoom factor  (default 2.0)
-
-Real capture ('takesy record') is coming -- see bead green-screen-am4.
 ")
 
 (defun cmd-demo (args)
@@ -76,6 +84,20 @@ Real capture ('takesy record') is coming -- see bead green-screen-am4.
         (format t "done: wrote ~A (~D frames)~%" path n)
         path))))
 
+(defun cmd-record (args)
+  (let* ((o     (parse-kv args))
+         (out   (opt o "output" "/tmp/takesy-record.mp4"))
+         (dur   (opt-num o "duration" 4.0))
+         (fps   (opt-int o "fps" 12))
+         (scale (opt-int o "scale" 3)))
+    (format t "takesy record: ~,1Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
+    (format t "  a screen-share dialog will appear -- pick a source.~%~
+                 the cursor hides during capture (auto-zoom needs it) and is restored on exit.~%")
+    (multiple-value-bind (path n)
+        (rec:record-to-mp4 :duration dur :fps fps :scale scale :out out)
+      (format t "done: wrote ~A (~D frames)~%" path n)
+      path)))
+
 (defun run (args)
   "Dispatch ARGS (the command-line minus argv0). Return normally on success;
 signal an error on failure. Kept separate from MAIN so it is REPL-callable."
@@ -83,6 +105,7 @@ signal an error on failure. Kept separate from MAIN so it is REPL-callable."
     (cond
       ((or (null cmd) (member cmd '("help" "--help" "-h") :test #'string=))
        (write-string +usage+) nil)
+      ((string= cmd "record") (cmd-record (rest args)))
       ((string= cmd "demo") (cmd-demo (rest args)))
       (t (error "unknown command ~S (try `takesy help`)" cmd)))))
 

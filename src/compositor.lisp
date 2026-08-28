@@ -614,35 +614,39 @@ H.264 mp4 at PATH. Return (values path n-frames). WIDTH/HEIGHT even (yuv420p)."
               (write-sequence (read-rgba width height) s))))
         (%encode-raw raw width height fps path n)))))
 
-(defun render-frame-sequence (keyframes frame-fn n-frames width height
+(defun render-frame-sequence (keyframes frame-fn n-frames out-w out-h
                               &key (fps 30) (source-format :rgba)
+                                   (source-width out-w) (source-height out-h)
+                                   (time-fn nil)
                                    (path "/tmp/takesy-seq.mp4"))
-  "Render a real per-frame video: FRAME-FN is (i) -> a WIDTHxHEIGHT byte vector in
-SOURCE-FORMAT (:rgba or captured :bgra) for output frame I. The compose shader is
-driven by KEYFRAMES sampled at t=i/FPS. The texture is uploaded once and updated
-in place each frame. Return (values path n-frames). This is the path that
-consumes a real capture frame sequence (bead green-screen-am4.3)."
+  "Render a real per-frame video into an OUT-W x OUT-H canvas. FRAME-FN is
+(i) -> a SOURCE-WIDTH x SOURCE-HEIGHT byte vector in SOURCE-FORMAT (:rgba or
+captured :bgra) for output frame I; the source (texture) size is decoupled from
+the output size, so a 3840x2400 capture can render to a small canvas. The compose
+shader is driven by KEYFRAMES sampled at (TIME-FN i) seconds, or i/FPS if TIME-FN
+is nil. The texture is uploaded once and updated in place each frame."
   (let ((raw (format nil "~A.raw" path)))
-    (egl:with-headless-gl (ctx width height)
+    (egl:with-headless-gl (ctx out-w out-h)
       (declare (ignore ctx))
-      (make-fbo width height)
+      (make-fbo out-w out-h)
       (let* ((program (make-program +vs-passthrough+ +fs-compose+))
              (vao     (make-fullscreen-quad))
-             (tex     (make-texture-rgba (funcall frame-fn 0) width height
+             (tex     (make-texture-rgba (funcall frame-fn 0) source-width source-height
                                          :source-format source-format :filter :linear)))
         (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
                                :if-exists :supersede)
           (dotimes (i n-frames)
             (when (> i 0)
-              (update-texture-rgba tex (funcall frame-fn i) width height
+              (update-texture-rgba tex (funcall frame-fn i) source-width source-height
                                    :source-format source-format))
-            (let ((frame (kf:sample-timeline keyframes (/ i (float fps 1.0)))))
+            (let* ((tsec  (if time-fn (funcall time-fn i) (/ i (float fps 1.0))))
+                   (frame (kf:sample-timeline keyframes tsec)))
               (gl:clear-color 0.0 0.0 0.0 1.0)
               (gl:clear :color-buffer-bit)
-              (draw-compose program vao tex frame width height)
+              (draw-compose program vao tex frame out-w out-h)
               (gl:finish)
-              (write-sequence (read-rgba width height) s))))
-        (%encode-raw raw width height fps path n-frames)))))
+              (write-sequence (read-rgba out-w out-h) s))))
+        (%encode-raw raw out-w out-h fps path n-frames)))))
 
 (defun bgrx-bridge-test (&key (width 256) (height 144))
   "Feed a BGRx copy of an RGBA pattern with :source-format :bgra and draw it 1:1;

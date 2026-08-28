@@ -49,9 +49,23 @@
   :components ((:module "src"
                 :components ((:file "demo")))))
 
+(asdf:defsystem "takesy/portal"
+  :description "xdg-desktop-portal ScreenCast handshake -> PipeWire fd + node id."
+  :depends-on ("dbus" "takesy/dbus-fd")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "portal")))))
+
+(asdf:defsystem "takesy/record"
+  :description "Record orchestration: portal capture -> Director -> compositor -> mp4."
+  :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "record")))))
+
 (asdf:defsystem "takesy/cli"
   :description "takesy command-line entry point (build the executable with build.lisp)."
-  :depends-on ("takesy/demo")
+  :depends-on ("takesy/demo" "takesy/record")
   :serial t
   :components ((:module "src"
                 :components ((:file "cli")))))
