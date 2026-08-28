@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; cli.lisp
 ;;;;
 ;;;; The `takesy` command-line entry point. Recording is the default action:

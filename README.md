@@ -1,10 +1,9 @@
-# takesy
+# Takesy
+> A Wayland-native screen recorder for Linux.
 
-A Wayland-native screen recorder for Linux, in the spirit of
-[polished](https://screencast). It records your screen, automatically
-zooms in on wherever you're working, smooths the cursor motion, and composites a
-polished result — padded background, rounded corners, and a drop shadow — to an
-mp4.
+Takesy records your screen, automatically zooms in on wherever you're
+working, smooths the cursor motion, and composites a polished result —
+padded background, rounded corners, and a drop shadow — to an mp4.
 
 ## Requirements
 
@@ -47,3 +46,10 @@ restored when you're done.
    the cursor (aiming at where you click, staying responsive when you point).
 3. **Composite** — GPU-renders the zoom, padded background, rounded corners,
    drop shadow, and cursor overlay, then encodes to an mp4 with `ffmpeg`.
+
+Author and License
+-------------------
+
+``takesy`` was created by [Anthony Green](https://github.com/atgreen)
+and is distributed under the MIT license.
+

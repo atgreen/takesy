@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; pipewire-package.lisp
 ;;;;
 ;;;; Bead green-screen-jme: pure-Lisp CFFI bindings to libpipewire-0.3.

@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; evdev.lisp
 ;;;;
 ;;;; Bead green-screen-am4.6: read real click/key events from Linux evdev

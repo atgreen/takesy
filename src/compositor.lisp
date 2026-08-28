@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; compositor.lisp
 ;;;;
 ;;;; Bead green-screen-7k8: GL compositor. Renders raw screen frames + Director

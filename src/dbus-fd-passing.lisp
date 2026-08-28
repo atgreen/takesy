@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; dbus-fd-passing.lisp
 ;;;;
 ;;;; Bead green-screen-sz0: teach the CL `dbus' client to actually RECEIVE

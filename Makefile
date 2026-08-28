@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+# SPDX-License-Identifier: MIT
 # takesy -- a Wayland-native screen recorder
 
 SBCL   ?= sbcl

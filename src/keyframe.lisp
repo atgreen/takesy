@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; keyframe.lisp
 ;;;;
 ;;;; Bead green-screen-7k8.3: the Director keyframe -- the contract between the

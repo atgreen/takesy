@@ -1,10 +1,12 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; build.lisp -- build the `takesy` executable.
 ;;;;
 ;;;;   sbcl --script build.lisp    ->  ./takesy
 ;;;;
-;;;; `--script` skips ~/.sbclrc, so we bootstrap ocicl's source registry the same
-;;;; way spike/run.lisp does, load takesy/cli, and dump a standalone executable
-;;;; whose toplevel is takesy/cli:main.
+;;;; `--script` skips ~/.sbclrc, so we bootstrap ocicl's source registry
+;;;; ourselves, load takesy/cli, and dump a standalone executable whose toplevel
+;;;; is takesy/cli:main.
 
 (let ((rt #p"/home/green/.local/share/ocicl/ocicl-runtime.lisp"))
   (when (probe-file rt) (load rt)))

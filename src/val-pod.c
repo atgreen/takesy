@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+// SPDX-License-Identifier: MIT
 /* val-pod.c -- validate a hand-built SPA POD by parsing it with real SPA.
  *
  *   cc $(pkg-config --cflags libpipewire-0.3) -o val-pod val-pod.c

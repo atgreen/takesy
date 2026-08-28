@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; spa-pod.lisp
 ;;;;
 ;;;; Hand-assembled SPA PODs (bead green-screen-jme). SPA's spa_pod_builder_*

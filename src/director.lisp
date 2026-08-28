@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; director.lisp
 ;;;;
 ;;;; Bead green-screen-wtd: the Director -- the post-processing "value-add" that

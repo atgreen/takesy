@@ -1,3 +1,5 @@
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-License-Identifier: MIT
 ;;;; pipewire.lisp
 ;;;;
 ;;;; Bead green-screen-jme: capture one frame (+ cursor position) from a portal
