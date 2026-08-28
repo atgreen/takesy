@@ -59,7 +59,7 @@ you're done. (If you haven't run `make install`, invoke it as `./takesy`.)
 | `--output PATH` | output mp4 | `/tmp/takesy-record.mp4` |
 | `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
 | `--fps N` | output frame rate | `24` |
-| `--scale K` | downsample the output to 1/K of the captured resolution | `3` |
+| `--height N` | maximum output height in px (never upscales past the content) | `1200` |
 
 ## How it works
 

@@ -57,7 +57,7 @@ options:
   --output PATH    output mp4            (default /tmp/takesy-record.mp4)
   --duration S     max seconds (safety)  (default 30)
   --fps    N       output frames/sec     (default 24; static stretches hold)
-  --scale  K       downsample output 1/K (default 3)
+  --height N        max output height, px (default 1200; never upscales)
   Pops a screen-share dialog; click GNOME's Stop button (top bar) to finish. The
   cursor hides during capture (auto-zoom needs its position), restored on exit.
 ")
@@ -67,13 +67,13 @@ options:
          (out   (opt o "output" "/tmp/takesy-record.mp4"))
          (dur   (opt-num o "duration" 30.0))
          (fps   (opt-int o "fps" 24))
-         (scale (opt-int o "scale" 3)))
-    (format t "takesy: recording up to ~,0Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
+         (height (opt-int o "height" 1200)))
+    (format t "takesy: recording up to ~,0Fs @ ~Dfps, up to ~Dp tall -> ~A~%" dur fps height out)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
     (multiple-value-bind (path n)
-        (rec:record-to-mp4 :duration dur :fps fps :scale scale :out out)
+        (rec:record-to-mp4 :duration dur :fps fps :max-height height :out out)
       (format t "done: wrote ~A (~D frames)~%" path n)
       path)))
 

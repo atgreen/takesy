@@ -141,7 +141,7 @@ the first. FRAMES is a vector in ascending :time order."
           do (setf idx i))
     idx))
 
-(defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (scale 3)
+(defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (max-height 1200)
                                             (fps 24) (duration nil)
                                             (cursor-session nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
@@ -149,8 +149,9 @@ the first. FRAMES is a vector in ascending :time order."
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
 stretches -- where the screencast emitted no frame -- hold the previous frame, so
 the clip is always full-length and smooth. CROP (x0 y0 x1 y1 source UV) frames
-only the content region: the output size (and aspect) comes from the crop, and
-the shader samples just that region. SCALE downsamples for a sane encode."
+only the content region. The output keeps the content's aspect and is sized so
+its height is at most MAX-HEIGHT (never upscaled past the content), for sharpness
+without an over-large file."
   (let* ((frames (coerce (getf rec :frames) 'vector))
          (nsrc (length frames)))
     (when (zerop nsrc) (error "recording has no frames"))
@@ -160,8 +161,8 @@ the shader samples just that region. SCALE downsamples for a sane encode."
              (nout (max 1 (round (* fps dur))))
              (fw (getf rec :width)) (fh (getf rec :height))    ; full frame = texture
              (cw (* (- cx1 cx0) fw)) (ch (* (- cy1 cy0) fh))   ; cropped content px
-             (ow (* 2 (max 1 (round (/ cw scale 2)))))         ; output = crop aspect
-             (oh (* 2 (max 1 (round (/ ch scale 2)))))
+             (oh (* 2 (max 1 (round (/ (min ch (float max-height 1.0)) 2)))))
+             (ow (* 2 (max 1 (round (/ (* cw (/ oh ch)) 2)))))
              (cache-idx -1) (cache-bytes nil)
              (cursor-fn (when cursor-session   ; cursor coords are in cropped px
                           (lambda (i)
@@ -185,7 +186,7 @@ the shader samples just that region. SCALE downsamples for a sane encode."
            :cursor-fn cursor-fn :crop crop
            :path out))))))
 
-(defun record-to-mp4 (&key (duration 30.0) (fps 24) (scale 3)
+(defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
   "Full `takesy record`: capture the screen (METADATA cursor mode, armed teardown)
 until you end the share -- click GNOME's Stop button in the top bar -- or DURATION
@@ -219,5 +220,5 @@ length is the ACTUAL captured span, not the cap. Return (values out n-frames)."
               (length timeline))
       ;; No :duration -> compose uses the actual captured span (you decide the
       ;; length by when you click Stop).
-      (compose-recording rec timeline :out out :scale scale
+      (compose-recording rec timeline :out out :max-height max-height
                          :fps fps :cursor-session eased :crop crop))))

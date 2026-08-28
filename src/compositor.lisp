@@ -583,16 +583,30 @@ ffmpeg ships libopenh264 but not libx264.")
   (or (find-if #'ffmpeg-has-encoder-p *h264-encoders*)
       (error "no usable H.264 encoder in ffmpeg (tried ~{~A~^, ~})" *h264-encoders*)))
 
+(defun %quality-flags (encoder width height fps)
+  "Per-encoder flags for a visually-sharp screen recording. x264 gets a low CRF
+(near-lossless) and a screen-tuned preset; encoders without CRF get a generous
+bitrate scaled to resolution (~0.12 bits/pixel, screen content compresses well)."
+  (cond
+    ((string= encoder "libx264")
+     (list "-crf" "18" "-preset" "slow" "-tune" "stillimage"))
+    (t
+     (let ((bps (max 4000000 (round (* width height fps 0.12)))))
+       (list "-b:v" (format nil "~D" bps) "-maxrate" (format nil "~D" (* 2 bps))
+             "-bufsize" (format nil "~D" (* 2 bps)))))))
+
 (defun %encode-raw (raw width height fps path n)
   "Encode the RAW rgba frame dump (N frames of WIDTHxHEIGHT) to an H.264 mp4."
   (let ((encoder (pick-h264-encoder)))
     (uiop:run-program
-     (list "ffmpeg" "-y" "-loglevel" "error"
-           "-f" "rawvideo" "-pix_fmt" "rgba"
-           "-s" (format nil "~Dx~D" width height)
-           "-r" (format nil "~D" fps) "-i" raw
-           "-c:v" encoder "-pix_fmt" "yuv420p"
-           "-movflags" "+faststart" path)
+     (append
+      (list "ffmpeg" "-y" "-loglevel" "error"
+            "-f" "rawvideo" "-pix_fmt" "rgba"
+            "-s" (format nil "~Dx~D" width height)
+            "-r" (format nil "~D" fps) "-i" raw
+            "-c:v" encoder)
+      (%quality-flags encoder width height fps)
+      (list "-pix_fmt" "yuv420p" "-movflags" "+faststart" path))
      :output t :error-output t)
     ;; the raw dump can be gigabytes (uncompressed RGBA); drop it once encoded.
     (ignore-errors (delete-file raw))
