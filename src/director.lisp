@@ -22,7 +22,8 @@
            #:session-width #:session-height #:session-cursor #:session-events
            #:session-duration
            #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
-           #:*cursor-omega* #:spring-step #:ease-cursor
+           #:*cursor-omega-slow* #:*cursor-omega-fast* #:*cursor-speed-ref*
+           #:*cursor-anticipate* #:spring-step #:ease-cursor
            #:activity-segment #:make-activity-segment #:activity-segment-p
            #:activity-segment-t-start #:activity-segment-t-end
            #:activity-segment-focus-x #:activity-segment-focus-y
@@ -86,14 +87,26 @@ clamps to the track endpoints outside its span."
                                          (* (- (cursor-sample-y b) (cursor-sample-y a)) u))))))))))
 
 ;;; ------------------------------------------------------------------
-;;; Cursor easing: a critically-damped spring (damping ratio = 1). The smoothed
-;;; cursor chases the raw one with a natural, overshoot-free lag -- the calm
-;;; pointer motion polished is known for. OMEGA is the angular frequency
-;;; (rad/s): higher = snappier, lower = floatier. Tune it live at the REPL via
-;;; *cursor-omega*; settling time is ~4/OMEGA seconds.
+;;; Cursor easing: a critically-damped spring (damping ratio = 1) with two smarts
+;;; on top, matching how people actually move a pointer:
+;;;
+;;;   * SPEED-ADAPTIVE stiffness -- fast, deliberate motion (pointing at things)
+;;;     gets a stiffer spring so it tracks closely (little lag); slow motion
+;;;     (settling on a target) gets a softer spring for a calm finish.
+;;;   * ANTICIPATION -- as the cursor nears a rest/click point (a dwell target),
+;;;     steer the spring's target toward that point, so it arrives straight
+;;;     instead of tracing the user's overshoot-and-correct wobble.
+;;;
+;;; All REPL-tunable.
 
-(defparameter *cursor-omega* 12.0
-  "Default cursor-spring angular frequency (rad/s). REPL-tunable.")
+(defparameter *cursor-omega-slow* 9.0
+  "Spring stiffness (rad/s) when the pointer is slow/settling -- smoother.")
+(defparameter *cursor-omega-fast* 30.0
+  "Spring stiffness (rad/s) when the pointer moves fast -- less lag for pointing.")
+(defparameter *cursor-speed-ref* 1800.0
+  "Pointer speed (px/s) at which stiffness reaches *cursor-omega-fast*.")
+(defparameter *cursor-anticipate* 0.4
+  "Seconds before a rest/click target to start aiming the cursor straight at it.")
 
 (defun spring-step (p v x omega dt)
   "Advance a critically-damped spring one step: position P, velocity V chasing
@@ -108,25 +121,47 @@ target X over DT at angular frequency OMEGA. Exact for a target held over DT
         (values (+ x (* dt* e))
                 (* (- b (* omega dt*)) e)))))
 
-(defun ease-cursor (session &key (omega *cursor-omega*))
-  "Return a smoothed copy of SESSION's cursor track: each raw sample eased by a
-critically-damped spring (independent x/y). Times are preserved; the smoothed
-path lags the raw one and never overshoots a step."
+(defun ease-cursor (session &key (omega-slow *cursor-omega-slow*)
+                                 (omega-fast *cursor-omega-fast*)
+                                 (speed-ref *cursor-speed-ref*)
+                                 (anticipate *cursor-anticipate*))
+  "Return a smoothed copy of SESSION's cursor track. Each step uses a
+critically-damped spring whose stiffness scales with pointer speed (responsive
+when pointing, calm when settling); near a dwell/rest target the spring aims at
+that target to cut overshoot. Times are preserved."
   (let ((track (session-cursor session)))
     (when (null track) (return-from ease-cursor '()))
-    (let* ((first (car track))
+    (let* ((rests (mapcar (lambda (s) (list (activity-segment-t-start s)
+                                            (activity-segment-focus-x s)
+                                            (activity-segment-focus-y s)))
+                          (detect-dwell-activity session)))
+           (first (car track))
            (px (cursor-sample-x first)) (py (cursor-sample-y first))
            (vx 0.0) (vy 0.0)
            (prev-t (cursor-sample-time first))
+           (prev-x px) (prev-y py)
            (out (list (make-cursor-sample :time prev-t :x px :y py))))
       (dolist (cs (cdr track) (nreverse out))
-        (let ((dt (- (cursor-sample-time cs) prev-t)))
-          (multiple-value-setq (px vx)
-            (spring-step px vx (cursor-sample-x cs) omega dt))
-          (multiple-value-setq (py vy)
-            (spring-step py vy (cursor-sample-y cs) omega dt))
-          (setf prev-t (cursor-sample-time cs))
-          (push (make-cursor-sample :time prev-t :x px :y py) out))))))
+        (let* ((tnow (cursor-sample-time cs))
+               (dt   (- tnow prev-t))
+               (rx   (cursor-sample-x cs)) (ry (cursor-sample-y cs)))
+          (when (> dt 0.0)
+            (let* ((speed (/ (sqrt (+ (expt (- rx prev-x) 2) (expt (- ry prev-y) 2))) dt))
+                   (frac  (max 0.0 (min 1.0 (/ speed speed-ref))))
+                   (omega (+ omega-slow (* (- omega-fast omega-slow) frac)))
+                   (tx rx) (ty ry)
+                   ;; the next rest/click target within the anticipation window
+                   (next (find-if (lambda (r) (<= 0.0 (- (first r) tnow) anticipate)) rests)))
+              (when next
+                (destructuring-bind (rt fx fy) next
+                  (let* ((u (- 1.0 (/ (- rt tnow) anticipate)))  ; 0 far -> 1 at target
+                         (w (* u u)))                            ; ease-in the aim
+                    (setf tx (+ (* (- 1.0 w) rx) (* w fx))
+                          ty (+ (* (- 1.0 w) ry) (* w fy))))))
+              (multiple-value-setq (px vx) (spring-step px vx tx omega dt))
+              (multiple-value-setq (py vy) (spring-step py vy ty omega dt))))
+          (setf prev-t tnow prev-x rx prev-y ry)
+          (push (make-cursor-sample :time tnow :x px :y py) out))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Activity detection. Cluster input events into bursts by time gap; each burst
