@@ -19,7 +19,8 @@
            #:keyframe-padding
            #:keyframe-corner-radius #:keyframe-shadow-blur #:keyframe-shadow-alpha
            #:keyframe-bg-color
-           #:clamp-center #:effective-center))
+           #:clamp-center #:effective-center
+           #:lerp #:ease-smoothstep #:lerp-keyframe #:sample-timeline))
 
 (in-package #:green-screen/keyframe)
 
@@ -46,3 +47,43 @@ stays fully inside [0,1]. At zoom<=1 the window is the whole frame -> 0.5."
 so a keyframe never pans the zoom window off the edge of the source."
   (cons (clamp-center (keyframe-center-x kf) (keyframe-zoom kf))
         (clamp-center (keyframe-center-y kf) (keyframe-zoom kf))))
+
+;;; ------------------------------------------------------------------
+;;; Timeline interpolation (shared with the Director, green-screen-wtd).
+
+(defun lerp (a b e) (+ a (* (- b a) e)))
+
+(defun ease-smoothstep (u)
+  "Smoothstep ease on U in [0,1]: zero slope at both ends (no motion snap)."
+  (let ((u (max 0.0 (min 1.0 (float u 1.0)))))
+    (* u u (- 3.0 (* 2.0 u)))))
+
+(defun lerp-keyframe (a b e)
+  "Interpolate every field of keyframes A and B by eased fraction E in [0,1]."
+  (flet ((k (fa fb) (lerp fa fb e)))
+    (make-keyframe
+     :time         (k (keyframe-time a) (keyframe-time b))
+     :zoom         (k (keyframe-zoom a) (keyframe-zoom b))
+     :center-x     (k (keyframe-center-x a) (keyframe-center-x b))
+     :center-y     (k (keyframe-center-y a) (keyframe-center-y b))
+     :padding      (k (keyframe-padding a) (keyframe-padding b))
+     :corner-radius (k (keyframe-corner-radius a) (keyframe-corner-radius b))
+     :shadow-blur  (k (keyframe-shadow-blur a) (keyframe-shadow-blur b))
+     :shadow-alpha (k (keyframe-shadow-alpha a) (keyframe-shadow-alpha b))
+     :bg-color     (mapcar (lambda (ca cb) (lerp ca cb e))
+                           (keyframe-bg-color a) (keyframe-bg-color b)))))
+
+(defun sample-timeline (keyframes time)
+  "The interpolated keyframe at TIME. KEYFRAMES need not be pre-sorted. Clamps to
+the endpoints outside the timeline; between two keyframes, eases with smoothstep."
+  (let ((ks (sort (copy-list keyframes) #'< :key #'keyframe-time)))
+    (cond
+      ((null ks) (error "sample-timeline: empty timeline"))
+      ((<= time (keyframe-time (first ks))) (first ks))
+      ((>= time (keyframe-time (car (last ks)))) (car (last ks)))
+      (t (loop for (a b) on ks
+               when (and b (<= (keyframe-time a) time) (< time (keyframe-time b)))
+                 do (let* ((span (- (keyframe-time b) (keyframe-time a)))
+                           (u    (if (zerop span) 0.0
+                                     (/ (- time (keyframe-time a)) span))))
+                      (return (lerp-keyframe a b (ease-smoothstep u)))))))))

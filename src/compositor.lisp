@@ -14,6 +14,7 @@
                     (#:kf  #:green-screen/keyframe))
   (:export #:bringup-test #:texture-1to1-test #:zoom-crop-test
            #:compose-test #:compose-reduction-check #:compose-shadow-test
+           #:render-timeline #:render-demo
            #:compile-shader #:make-program #:make-fullscreen-quad
            #:make-texture-rgba #:draw-textured-quad #:draw-zoom #:draw-compose
            #:make-test-pattern #:make-gradient-pattern))
@@ -527,3 +528,78 @@ darker than the background, and (b) the top-left canvas corner is still clean bg
               (format t "  [m5] drop shadow verified (band darker, corner clean) -> ~A~%"
                       path)))
           path)))))
+
+;;; ------------------------------------------------------------------
+;;; M6 (7k8.6): the finale. Interpolate a keyframe timeline across N frames,
+;;; render each through the compose shader, and encode to mp4. Context/program/
+;;; quad/texture are built once and reused across frames (the source is a still
+;;; for the MVP; a real capture is a per-frame texture upload later). Frames are
+;;; streamed to a raw file, then encoded in one ffmpeg pass.
+
+(defparameter *h264-encoders* '("libx264" "libopenh264")
+  "Software H.264 encoders to try, best-first. Distros vary: Fedora's default
+ffmpeg ships libopenh264 but not libx264.")
+
+(defun ffmpeg-has-encoder-p (name)
+  (let ((out (with-output-to-string (s)
+               (ignore-errors
+                (uiop:run-program (list "ffmpeg" "-hide_banner" "-encoders")
+                                  :output s :error-output nil
+                                  :ignore-error-status t)))))
+    (and (search name out) t)))
+
+(defun pick-h264-encoder ()
+  (or (find-if #'ffmpeg-has-encoder-p *h264-encoders*)
+      (error "no usable H.264 encoder in ffmpeg (tried ~{~A~^, ~})" *h264-encoders*)))
+
+(defun render-timeline (keyframes source width height
+                        &key (fps 30) (duration 3.0) (path "/tmp/gs-comp.mp4"))
+  "Animate SOURCE (RGBA bytes, WxH) through the compose shader driven by
+KEYFRAMES over DURATION seconds at FPS, encode to an H.264 mp4 at PATH.
+Return (values path n-frames). WIDTH/HEIGHT should be even (yuv420p)."
+  (let* ((n   (max 1 (round (* fps duration))))
+         (raw (format nil "~A.raw" path)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let ((program (make-program +vs-passthrough+ +fs-compose+))
+            (vao     (make-fullscreen-quad))
+            (tex     (make-texture-rgba source width height)))
+        (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
+                               :if-exists :supersede)
+          (dotimes (i n)
+            (let* ((tsec  (if (= n 1) 0.0 (* duration (/ i (float (1- n) 1.0)))))
+                   (frame (kf:sample-timeline keyframes tsec)))
+              (gl:clear-color 0.0 0.0 0.0 1.0)
+              (gl:clear :color-buffer-bit)
+              (draw-compose program vao tex frame width height)
+              (gl:finish)
+              (write-sequence (read-rgba width height) s))))
+        (let ((encoder (pick-h264-encoder)))
+          (uiop:run-program
+           (list "ffmpeg" "-y" "-loglevel" "error"
+                 "-f" "rawvideo" "-pix_fmt" "rgba"
+                 "-s" (format nil "~Dx~D" width height)
+                 "-r" (format nil "~D" fps) "-i" raw
+                 "-c:v" encoder "-pix_fmt" "yuv420p"
+                 "-movflags" "+faststart" path)
+           :output t :error-output t)
+          (format t "  [m6] encoded ~D frames (~,1Fs @ ~Dfps, ~A) -> ~A~%"
+                  n duration fps encoder path))
+        (values path n)))))
+
+(defun render-demo (&key (width 320) (height 200) (fps 30) (duration 3.0)
+                         (path "/tmp/gs-comp.mp4"))
+  "M6 demo: an auto-zoom timeline over a still test pattern -> mp4. Punches in on
+the top-left, pans to the bottom-right, then eases back out."
+  (let* ((src (make-test-pattern width height))
+         (pad 0.06) (corner 0.10) (sblur 0.05) (salpha 0.5) (bg '(0.11 0.12 0.15)))
+    (flet ((k (time zoom cx cy)
+             (kf:make-keyframe :time time :zoom zoom :center-x cx :center-y cy
+                               :padding pad :corner-radius corner
+                               :shadow-blur sblur :shadow-alpha salpha :bg-color bg)))
+      (render-timeline (list (k 0.0 1.0 0.5  0.5)
+                             (k 1.2 2.2 0.28 0.30)
+                             (k 2.0 2.2 0.72 0.68)
+                             (k 3.0 1.0 0.5  0.5))
+                       src width height :fps fps :duration duration :path path))))
