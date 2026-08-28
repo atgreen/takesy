@@ -32,38 +32,63 @@ the frames that carried a cursor position, in capture order."
     (dir:make-session :width (getf rec :width) :height (getf rec :height)
                       :cursor cursor :events '())))
 
-(defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (scale 3))
-  "Render REC's real BGRx frames through the compositor driven by TIMELINE.
-SCALE downsamples the output (capture / SCALE, rounded even) so 4K encodes stay
-sane while the shader still samples the full-res source texture."
-  (let* ((frames (coerce (getf rec :frames) 'vector))
-         (n  (length frames))
-         (sw (getf rec :width)) (sh (getf rec :height))
-         (fps (max 1 (or (getf rec :fps) 30)))
-         (ow (* 2 (max 1 (round (/ sw scale 2)))))
-         (oh (* 2 (max 1 (round (/ sh scale 2))))))
-    (when (zerop n) (error "recording has no frames"))
-    (format t "  [record] compositing ~D frames ~Dx~D -> ~Dx~D~%" n sw sh ow oh)
-    (comp:render-frame-sequence
-     timeline
-     (lambda (i) (%read-file-bytes (getf (aref frames i) :path)))
-     n ow oh
-     :fps fps :source-format :bgra
-     :source-width sw :source-height sh
-     :time-fn (lambda (i) (float (getf (aref frames i) :time) 1.0))
-     :path out)))
+(defun %nearest-frame-index (frames tsec)
+  "Index of the last source frame with :time <= TSEC (hold-previous); 0 before
+the first. FRAMES is a vector in ascending :time order."
+  (let ((idx 0))
+    (loop for i below (length frames)
+          while (<= (getf (aref frames i) :time) tsec)
+          do (setf idx i))
+    idx))
 
-(defun record-to-mp4 (&key (duration 4.0) (fps 12) (scale 3)
+(defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (scale 3)
+                                            (fps 24) (duration nil))
+  "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
+STEADY output FPS over DURATION seconds (default: the captured time span). Static
+stretches -- where the screencast emitted no frame -- hold the previous frame, so
+the clip is always full-length and smooth regardless of how sparsely the
+compositor delivered frames. SCALE downsamples the 4K source for a sane encode."
+  (let* ((frames (coerce (getf rec :frames) 'vector))
+         (nsrc (length frames)))
+    (when (zerop nsrc) (error "recording has no frames"))
+    (let* ((span (float (getf (aref frames (1- nsrc)) :time) 1.0))
+           (dur  (or duration span))
+           (nout (max 1 (round (* fps dur))))
+           (sw (getf rec :width)) (sh (getf rec :height))
+           (ow (* 2 (max 1 (round (/ sw scale 2)))))
+           (oh (* 2 (max 1 (round (/ sh scale 2)))))
+           (cache-idx -1) (cache-bytes nil))
+      (format t "  [record] compositing ~D src frames -> ~D output frames ~
+                 (~,1Fs @ ~Dfps) ~Dx~D -> ~Dx~D~%" nsrc nout dur fps sw sh ow oh)
+      (flet ((src (i)   ; nearest source frame for output time i/fps, cached
+               (let ((idx (%nearest-frame-index frames (/ i (float fps 1.0)))))
+                 (unless (= idx cache-idx)
+                   (setf cache-idx idx
+                         cache-bytes (%read-file-bytes (getf (aref frames idx) :path))))
+                 cache-bytes)))
+        (comp:render-frame-sequence
+         timeline #'src nout ow oh
+         :fps fps :source-format :bgra
+         :source-width sw :source-height sh
+         :time-fn (lambda (i) (/ i (float fps 1.0)))
+         :path out)))))
+
+(defun record-to-mp4 (&key (duration 4.0) (fps 24) (scale 3)
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
   "Full `takesy record`: capture DURATION seconds (METADATA cursor mode, armed
 teardown), auto-zoom via the Director (dwell-based, no evdev needed), and render
-the real captured frames to an mp4 at OUT. Return (values out n-frames)."
+the real captured frames to a full-length mp4 at OUT. FPS is the OUTPUT frame
+rate; static stretches hold the last frame. Return (values out n-frames)."
   (portal:with-screencast (fd node :cursor-mode portal:+cursor-metadata+)
-    (let* ((rec      (pw:record-frames fd node :duration duration :max-fps fps :dir dir))
+    ;; Capture throttle a bit above the output rate so we keep enough source
+    ;; frames; the real limit is the compositor's on-change delivery.
+    (let* ((rec      (pw:record-frames fd node :duration duration
+                                       :max-fps (max fps 30) :dir dir))
            (session  (recording->session rec))
            (timeline (dir:plan-timeline session)))   ; :auto -> dwell (no events)
       (format t "  [record] captured ~D frames, ~D cursor samples -> ~D keyframes~%"
               (length (getf rec :frames))
               (length (dir:session-cursor session))
               (length timeline))
-      (compose-recording rec timeline :out out :scale scale))))
+      (compose-recording rec timeline :out out :scale scale
+                         :fps fps :duration duration))))

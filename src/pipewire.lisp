@@ -35,7 +35,9 @@
   (update-rc nil) (meta-types nil)
   ;; recording mode (am4.1): capture many frames over a deadline instead of one.
   (record-p nil) (record-dir nil)
-  (record-start 0) (record-deadline 0) (record-min-dt 0) (record-last nil)
+  ;; record-start is nil until the first frame actually arrives (the clock starts
+  ;; then, so negotiation latency doesn't shorten the clip -- bead am4.7).
+  (record-start nil) (record-duration 0) (record-min-dt 0) (record-last nil)
   (n-saved 0) (frames '())
   (done nil) (error nil) (n-empty 0))
 
@@ -150,10 +152,15 @@ id /= 0 (valid cursor data)."
 
 (defun %record-frame (cap stream b spabuf dptr csize cstride coff)
   "Recording-mode buffer handler: save throttled frames + per-frame cursor until
-the deadline, then quit the loop. Always requeues the buffer."
+DURATION elapses from the first frame, then quit the loop. Always requeues."
   (let ((now (get-internal-real-time)))
-    (cond
-      ((>= now (capture-record-deadline cap))
+    ;; Start the clock on the first real frame so DURATION is wall-clock of
+    ;; actual capture, not shortened by portal/PipeWire negotiation (am4.7).
+    (unless (capture-record-start cap)
+      (setf (capture-record-start cap) now))
+    (let ((deadline (+ (capture-record-start cap) (capture-record-duration cap))))
+     (cond
+      ((>= now deadline)
        (setf (capture-done cap) t)
        (pw-stream-queue-buffer stream b)
        (pw-main-loop-quit (capture-loop cap)))
@@ -176,7 +183,7 @@ the deadline, then quit the loop. Always requeues the buffer."
            (incf (capture-n-saved cap))
            (setf (capture-record-last cap) now)))
        (pw-stream-queue-buffer stream b))
-      (t (pw-stream-queue-buffer stream b)))))   ; throttled: skip this frame
+      (t (pw-stream-queue-buffer stream b))))))   ; throttled: skip this frame
 
 (cffi:defcallback cb-process :void ((data :pointer))
   (declare (ignore data))
@@ -313,13 +320,12 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
   (:i :time :cursor-x :cursor-y :path) in capture order."
   (ensure-directories-exist (concatenate 'string (string-right-trim "/" dir) "/"))
   (multiple-value-bind (mloop ctx stream) (%open-stream fd node-id)
-    (let* ((now (get-internal-real-time))
-           (cap (make-capture :loop mloop :stream stream
+    (let* ((cap (make-capture :loop mloop :stream stream
                               :record-p t
                               :record-dir (string-right-trim "/" dir)
-                              :record-start now
-                              :record-deadline
-                              (+ now (round (* duration internal-time-units-per-second)))
+                              ;; clock starts on the first frame (%record-frame)
+                              :record-duration
+                              (round (* duration internal-time-units-per-second))
                               :record-min-dt
                               (round (/ internal-time-units-per-second (max 1 max-fps))))))
       (%run-and-teardown mloop ctx stream node-id cap)

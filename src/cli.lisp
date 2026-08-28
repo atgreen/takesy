@@ -57,7 +57,7 @@ Usage:
 record options:
   --output PATH    output mp4            (default /tmp/takesy-record.mp4)
   --duration S     seconds to record     (default 4)
-  --fps    N       capture frames/sec    (default 12)
+  --fps    N       output frames/sec     (default 24; static stretches hold)
   --scale  K       downsample output 1/K (default 3)
   Pops a screen-share dialog; the cursor hides during capture (auto-zoom needs
   its position) and is restored on exit.
@@ -88,7 +88,7 @@ demo options:
   (let* ((o     (parse-kv args))
          (out   (opt o "output" "/tmp/takesy-record.mp4"))
          (dur   (opt-num o "duration" 4.0))
-         (fps   (opt-int o "fps" 12))
+         (fps   (opt-int o "fps" 24))
          (scale (opt-int o "scale" 3)))
     (format t "takesy record: ~,1Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
