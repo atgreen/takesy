@@ -375,6 +375,7 @@ uniform float u_corner;       // rounded-rect radius, fraction of min(content di
 uniform vec3  u_bg;           // background colour
 uniform float u_shadow_blur;  // shadow softness, fraction of min(W,H); 0 = none
 uniform float u_shadow_alpha; // shadow peak opacity 0..1
+uniform vec4  u_crop;         // (x0,y0,x1,y1) source UV region to show; 0011 = all
 
 // Signed distance to a rounded box centred at origin, half-size b, radius r.
 float sd_round_box(vec2 p, vec2 b, float r) {
@@ -396,6 +397,7 @@ void main() {
   float ins = 1.0 - smoothstep(-aa, aa, d);
   vec2  cuv = (P - lo) / sz;                       // UV within the inset rect
   vec2  suv = u_center + (cuv - vec2(0.5)) / u_zoom;
+  suv = u_crop.xy + suv * (u_crop.zw - u_crop.xy);   // crop to the content region
   vec3  screen = texture(tex, suv).rgb;
 
   // Soft drop shadow: an offset, blurred copy of the same rounded rect, behind
@@ -413,10 +415,11 @@ void main() {
   frag = vec4(col, 1.0);
 }")
 
-(defun draw-compose (program vao tex frame canvas-w canvas-h)
+(defun draw-compose (program vao tex frame canvas-w canvas-h &optional (crop '(0.0 0.0 1.0 1.0)))
   "Draw FRAME's zoomed screen inset on its background, rounded corners, into the
-bound FBO. CANVAS-W/H are the output size in pixels (needed for isotropic
-padding + circular corners)."
+bound FBO. CANVAS-W/H are the output size in pixels. CROP (x0 y0 x1 y1 in source
+UV) selects the region of the source to show -- used to trim empty desktop
+borders so the output frames the actual content."
   (let ((ec (kf:effective-center frame)))
     (gl:use-program program)
     (gl:active-texture :texture0)
@@ -433,7 +436,11 @@ padding + circular corners)."
       (let ((l (uni "u_bg")))
         (when (>= l 0)
           (destructuring-bind (r g b) (kf:keyframe-bg-color frame)
-            (gl:uniformf l (float r 1.0) (float g 1.0) (float b 1.0))))))
+            (gl:uniformf l (float r 1.0) (float g 1.0) (float b 1.0)))))
+      (let ((l (uni "u_crop")))
+        (when (>= l 0)
+          (destructuring-bind (x0 y0 x1 y1) crop
+            (gl:uniformf l (float x0 1.0) (float y0 1.0) (float x1 1.0) (float y1 1.0))))))
     (gl:bind-vertex-array vao)
     (gl:draw-arrays :triangle-strip 0 4)))
 
@@ -694,6 +701,7 @@ when the cursor falls outside the zoomed content view."
                               &key (fps 30) (source-format :rgba)
                                    (source-width out-w) (source-height out-h)
                                    (time-fn nil) (cursor-fn nil)
+                                   (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
   "Render a real per-frame video into an OUT-W x OUT-H canvas. FRAME-FN is
 (i) -> a SOURCE-WIDTH x SOURCE-HEIGHT byte vector in SOURCE-FORMAT (:rgba or
@@ -723,7 +731,7 @@ zoom and drawn as an overlay. The texture is uploaded once and updated each fram
                    (frame (kf:sample-timeline keyframes tsec)))
               (gl:clear-color 0.0 0.0 0.0 1.0)
               (gl:clear :color-buffer-bit)
-              (draw-compose program vao tex frame out-w out-h)
+              (draw-compose program vao tex frame out-w out-h crop)
               (when curs-prog
                 (let ((cuv (funcall cursor-fn i)))
                   (when cuv
