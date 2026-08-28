@@ -21,7 +21,8 @@
            #:session #:make-session #:session-p
            #:session-width #:session-height #:session-cursor #:session-events
            #:session-duration
-           #:px->uv #:cursor-at #:make-synthetic-session #:validate-session))
+           #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
+           #:*cursor-omega* #:spring-step #:ease-cursor))
 
 (in-package #:takesy/director)
 
@@ -75,6 +76,49 @@ clamps to the track endpoints outside its span."
                                          (* (- (cursor-sample-x b) (cursor-sample-x a)) u))
                                       (+ (cursor-sample-y a)
                                          (* (- (cursor-sample-y b) (cursor-sample-y a)) u))))))))))
+
+;;; ------------------------------------------------------------------
+;;; Cursor easing: a critically-damped spring (damping ratio = 1). The smoothed
+;;; cursor chases the raw one with a natural, overshoot-free lag -- the calm
+;;; pointer motion polished is known for. OMEGA is the angular frequency
+;;; (rad/s): higher = snappier, lower = floatier. Tune it live at the REPL via
+;;; *cursor-omega*; settling time is ~4/OMEGA seconds.
+
+(defparameter *cursor-omega* 12.0
+  "Default cursor-spring angular frequency (rad/s). REPL-tunable.")
+
+(defun spring-step (p v x omega dt)
+  "Advance a critically-damped spring one step: position P, velocity V chasing
+target X over DT at angular frequency OMEGA. Exact for a target held over DT
+(so it is stable at any DT). Return (values new-p new-v)."
+  (if (<= dt 0.0)
+      (values p v)
+      (let* ((d0 (- p x))
+             (b  (+ v (* omega d0)))
+             (e  (exp (- (* omega dt))))
+             (dt* (+ d0 (* b dt))))
+        (values (+ x (* dt* e))
+                (* (- b (* omega dt*)) e)))))
+
+(defun ease-cursor (session &key (omega *cursor-omega*))
+  "Return a smoothed copy of SESSION's cursor track: each raw sample eased by a
+critically-damped spring (independent x/y). Times are preserved; the smoothed
+path lags the raw one and never overshoots a step."
+  (let ((track (session-cursor session)))
+    (when (null track) (return-from ease-cursor '()))
+    (let* ((first (car track))
+           (px (cursor-sample-x first)) (py (cursor-sample-y first))
+           (vx 0.0) (vy 0.0)
+           (prev-t (cursor-sample-time first))
+           (out (list (make-cursor-sample :time prev-t :x px :y py))))
+      (dolist (cs (cdr track) (nreverse out))
+        (let ((dt (- (cursor-sample-time cs) prev-t)))
+          (multiple-value-setq (px vx)
+            (spring-step px vx (cursor-sample-x cs) omega dt))
+          (multiple-value-setq (py vy)
+            (spring-step py vy (cursor-sample-y cs) omega dt))
+          (setf prev-t (cursor-sample-time cs))
+          (push (make-cursor-sample :time prev-t :x px :y py) out))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Synthetic fixtures. A deterministic session (no RNG, so tests are stable):
