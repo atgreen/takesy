@@ -14,7 +14,8 @@
                     (#:kf  #:takesy/keyframe))
   (:export #:bringup-test #:texture-1to1-test #:zoom-crop-test
            #:compose-test #:compose-reduction-check #:compose-shadow-test
-           #:render-timeline #:render-demo
+           #:render-timeline #:render-frame-sequence #:render-demo
+           #:update-texture-rgba #:rgba->bgrx #:bgrx-bridge-test
            #:compile-shader #:make-program #:make-fullscreen-quad
            #:make-texture-rgba #:draw-textured-quad #:draw-zoom #:draw-compose
            #:make-test-pattern #:make-gradient-pattern))
@@ -165,18 +166,39 @@ Return (values vao vbo)."
     (gl:vertex-attrib-pointer 1 2 :float nil 16 8)
     (values vao vbo)))
 
-(defun make-texture-rgba (bytes w h)
-  "Upload BYTES (a (unsigned-byte 8) RGBA vector, len w*h*4) as a 2D texture.
-NEAREST filtering + clamp so a 1:1 draw reproduces texels exactly."
+(defun make-texture-rgba (bytes w h &key (source-format :rgba) (filter :nearest))
+  "Upload BYTES (a (unsigned-byte 8) vector, len w*h*4) as an RGBA8 texture.
+SOURCE-FORMAT is how GL should read the bytes: :rgba, or :bgra for captured
+frames (SPA BGRx, fmt=8) so R/B land correctly with no shader change. FILTER is
+:nearest (exact 1:1) or :linear (smooth when scaled)."
   (let ((tex (gl:gen-texture)))
     (gl:bind-texture :texture-2d tex)
-    (gl:tex-parameter :texture-2d :texture-min-filter :nearest)
-    (gl:tex-parameter :texture-2d :texture-mag-filter :nearest)
+    (gl:tex-parameter :texture-2d :texture-min-filter filter)
+    (gl:tex-parameter :texture-2d :texture-mag-filter filter)
     (gl:tex-parameter :texture-2d :texture-wrap-s :clamp-to-edge)
     (gl:tex-parameter :texture-2d :texture-wrap-t :clamp-to-edge)
     (cffi:with-pointer-to-vector-data (ptr bytes)
-      (gl:tex-image-2d :texture-2d 0 :rgba w h 0 :rgba :unsigned-byte ptr))
+      (gl:tex-image-2d :texture-2d 0 :rgba w h 0 source-format :unsigned-byte ptr))
     tex))
+
+(defun update-texture-rgba (tex bytes w h &key (source-format :rgba))
+  "Replace TEX's pixels in place (glTexSubImage2D) -- for a per-frame video source
+where re-uploading a whole new texture each frame would churn allocations."
+  (gl:bind-texture :texture-2d tex)
+  (cffi:with-pointer-to-vector-data (ptr bytes)
+    (gl:tex-sub-image-2d :texture-2d 0 0 0 w h source-format :unsigned-byte ptr))
+  tex)
+
+(defun rgba->bgrx (rgba)
+  "Swap R and B channels of an RGBA byte vector, yielding BGRx (the SPA capture
+layout, fmt=8). Reference/test helper -- real capture already delivers BGRx."
+  (let ((out (make-array (length rgba) :element-type '(unsigned-byte 8))))
+    (loop for i below (length rgba) by 4 do
+      (setf (aref out i)       (aref rgba (+ i 2))
+            (aref out (+ i 1)) (aref rgba (+ i 1))
+            (aref out (+ i 2)) (aref rgba i)
+            (aref out (+ i 3)) (aref rgba (+ i 3))))
+    out))
 
 (defun draw-textured-quad (program vao tex)
   (gl:use-program program)
@@ -552,11 +574,26 @@ ffmpeg ships libopenh264 but not libx264.")
   (or (find-if #'ffmpeg-has-encoder-p *h264-encoders*)
       (error "no usable H.264 encoder in ffmpeg (tried ~{~A~^, ~})" *h264-encoders*)))
 
+(defun %encode-raw (raw width height fps path n)
+  "Encode the RAW rgba frame dump (N frames of WIDTHxHEIGHT) to an H.264 mp4."
+  (let ((encoder (pick-h264-encoder)))
+    (uiop:run-program
+     (list "ffmpeg" "-y" "-loglevel" "error"
+           "-f" "rawvideo" "-pix_fmt" "rgba"
+           "-s" (format nil "~Dx~D" width height)
+           "-r" (format nil "~D" fps) "-i" raw
+           "-c:v" encoder "-pix_fmt" "yuv420p"
+           "-movflags" "+faststart" path)
+     :output t :error-output t)
+    (format t "  [enc] ~D frames @ ~Dfps (~A) -> ~A~%" n fps encoder path)
+    (values path n)))
+
 (defun render-timeline (keyframes source width height
-                        &key (fps 30) (duration 3.0) (path "/tmp/gs-comp.mp4"))
-  "Animate SOURCE (RGBA bytes, WxH) through the compose shader driven by
-KEYFRAMES over DURATION seconds at FPS, encode to an H.264 mp4 at PATH.
-Return (values path n-frames). WIDTH/HEIGHT should be even (yuv420p)."
+                        &key (fps 30) (duration 3.0) (path "/tmp/gs-comp.mp4")
+                             (source-format :rgba))
+  "Animate a still SOURCE (bytes, WxH; SOURCE-FORMAT :rgba or :bgra) through the
+compose shader driven by KEYFRAMES over DURATION seconds at FPS, encode to an
+H.264 mp4 at PATH. Return (values path n-frames). WIDTH/HEIGHT even (yuv420p)."
   (let* ((n   (max 1 (round (* fps duration))))
          (raw (format nil "~A.raw" path)))
     (egl:with-headless-gl (ctx width height)
@@ -564,7 +601,7 @@ Return (values path n-frames). WIDTH/HEIGHT should be even (yuv420p)."
       (make-fbo width height)
       (let ((program (make-program +vs-passthrough+ +fs-compose+))
             (vao     (make-fullscreen-quad))
-            (tex     (make-texture-rgba source width height)))
+            (tex     (make-texture-rgba source width height :source-format source-format)))
         (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
                                :if-exists :supersede)
           (dotimes (i n)
@@ -575,18 +612,64 @@ Return (values path n-frames). WIDTH/HEIGHT should be even (yuv420p)."
               (draw-compose program vao tex frame width height)
               (gl:finish)
               (write-sequence (read-rgba width height) s))))
-        (let ((encoder (pick-h264-encoder)))
-          (uiop:run-program
-           (list "ffmpeg" "-y" "-loglevel" "error"
-                 "-f" "rawvideo" "-pix_fmt" "rgba"
-                 "-s" (format nil "~Dx~D" width height)
-                 "-r" (format nil "~D" fps) "-i" raw
-                 "-c:v" encoder "-pix_fmt" "yuv420p"
-                 "-movflags" "+faststart" path)
-           :output t :error-output t)
-          (format t "  [m6] encoded ~D frames (~,1Fs @ ~Dfps, ~A) -> ~A~%"
-                  n duration fps encoder path))
-        (values path n)))))
+        (%encode-raw raw width height fps path n)))))
+
+(defun render-frame-sequence (keyframes frame-fn n-frames width height
+                              &key (fps 30) (source-format :rgba)
+                                   (path "/tmp/takesy-seq.mp4"))
+  "Render a real per-frame video: FRAME-FN is (i) -> a WIDTHxHEIGHT byte vector in
+SOURCE-FORMAT (:rgba or captured :bgra) for output frame I. The compose shader is
+driven by KEYFRAMES sampled at t=i/FPS. The texture is uploaded once and updated
+in place each frame. Return (values path n-frames). This is the path that
+consumes a real capture frame sequence (bead green-screen-am4.3)."
+  (let ((raw (format nil "~A.raw" path)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let* ((program (make-program +vs-passthrough+ +fs-compose+))
+             (vao     (make-fullscreen-quad))
+             (tex     (make-texture-rgba (funcall frame-fn 0) width height
+                                         :source-format source-format :filter :linear)))
+        (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
+                               :if-exists :supersede)
+          (dotimes (i n-frames)
+            (when (> i 0)
+              (update-texture-rgba tex (funcall frame-fn i) width height
+                                   :source-format source-format))
+            (let ((frame (kf:sample-timeline keyframes (/ i (float fps 1.0)))))
+              (gl:clear-color 0.0 0.0 0.0 1.0)
+              (gl:clear :color-buffer-bit)
+              (draw-compose program vao tex frame width height)
+              (gl:finish)
+              (write-sequence (read-rgba width height) s))))
+        (%encode-raw raw width height fps path n-frames)))))
+
+(defun bgrx-bridge-test (&key (width 256) (height 144))
+  "Feed a BGRx copy of an RGBA pattern with :source-format :bgra and draw it 1:1;
+the RGB output must equal the original exactly, proving the capture-format bridge
+corrects channel order with no shader change. Return T or error."
+  (let* ((rgba (make-gradient-pattern width height))
+         (bgrx (rgba->bgrx rgba)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let ((program (make-program +vs-passthrough+ +fs-texture+))
+            (vao     (make-fullscreen-quad))
+            (tex     (make-texture-rgba bgrx width height :source-format :bgra)))
+        (gl:clear-color 0.0 0.0 0.0 1.0)
+        (gl:clear :color-buffer-bit)
+        (draw-textured-quad program vao tex)
+        (gl:finish)
+        (let* ((out (read-rgba width height))
+               (bad (loop for i below (length rgba) by 4
+                          count (or (/= (aref rgba i)       (aref out i))
+                                    (/= (aref rgba (+ i 1)) (aref out (+ i 1)))
+                                    (/= (aref rgba (+ i 2)) (aref out (+ i 2)))))))
+          (format t "  [7k8.7] bgrx-bridge mismatched pixels = ~D / ~D~%"
+                  bad (* width height))
+          (unless (zerop bad) (error "BGRx bridge mismatch: ~D px" bad))
+          (format t "  [7k8.7] BGRx->RGBA exact -- channel order corrected~%")
+          t)))))
 
 (defun render-demo (&key (width 320) (height 200) (fps 30) (duration 3.0)
                          (path "/tmp/gs-comp.mp4"))
