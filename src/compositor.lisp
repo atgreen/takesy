@@ -13,8 +13,9 @@
   (:local-nicknames (#:egl #:green-screen/egl)
                     (#:kf  #:green-screen/keyframe))
   (:export #:bringup-test #:texture-1to1-test #:zoom-crop-test
+           #:compose-test #:compose-reduction-check
            #:compile-shader #:make-program #:make-fullscreen-quad
-           #:make-texture-rgba #:draw-textured-quad #:draw-zoom
+           #:make-texture-rgba #:draw-textured-quad #:draw-zoom #:draw-compose
            #:make-test-pattern #:make-gradient-pattern))
 
 (in-package #:green-screen/compositor)
@@ -250,24 +251,28 @@ Return the R,G,B bytes."
          (i  (* 4 (+ (* sy w) sx))))
     (values (aref src i) (aref src (+ i 1)) (aref src (+ i 2)))))
 
-(defun verify-zoom (src out w h zoom cx cy &key (tol 3))
+(defun verify-zoom (src out w h zoom cx cy &key (tol 3) (border 0))
   "Compare every output pixel against the predicted nearest-sample of SRC under
 the zoom/pan transform. Readback row r <-> output uv.v=(r+0.5)/h (bottom-origin,
-matching glReadPixels); col c <-> uv.u=(c+0.5)/w. Return (values bad-count worst)."
+matching glReadPixels); col c <-> uv.u=(c+0.5)/w. BORDER skips that many edge
+pixels (used when an antialiased rounded edge blends the outermost ring).
+Return (values bad-count worst)."
   (let ((bad 0) (worst 0))
     (dotimes (r h)
       (dotimes (c w)
-        (let* ((ovx (/ (+ c 0.5) w))
-               (ovy (/ (+ r 0.5) h))
-               (u   (+ cx (/ (- ovx 0.5) zoom)))
-               (v   (+ cy (/ (- ovy 0.5) zoom)))
-               (oi  (* 4 (+ (* r w) c))))
-          (multiple-value-bind (er eg eb) (sample-nearest src w h u v)
-            (let ((d (max (abs (- er (aref out oi)))
-                          (abs (- eg (aref out (+ oi 1))))
-                          (abs (- eb (aref out (+ oi 2)))))))
-              (setf worst (max worst d))
-              (when (> d tol) (incf bad)))))))
+        (unless (or (< r border) (>= r (- h border))
+                    (< c border) (>= c (- w border)))
+          (let* ((ovx (/ (+ c 0.5) w))
+                 (ovy (/ (+ r 0.5) h))
+                 (u   (+ cx (/ (- ovx 0.5) zoom)))
+                 (v   (+ cy (/ (- ovy 0.5) zoom)))
+                 (oi  (* 4 (+ (* r w) c))))
+            (multiple-value-bind (er eg eb) (sample-nearest src w h u v)
+              (let ((d (max (abs (- er (aref out oi)))
+                            (abs (- eg (aref out (+ oi 1))))
+                            (abs (- eb (aref out (+ oi 2)))))))
+                (setf worst (max worst d))
+                (when (> d tol) (incf bad))))))))
     (values bad worst)))
 
 (defun zoom-crop-test (&key (width 256) (height 144)
@@ -324,4 +329,130 @@ and assert an exact byte-for-byte match. Also writes PATH for eyeballing."
             (error "1:1 round-trip mismatch: ~D of ~D bytes differ"
                    mism (length src)))
           (format t "  [m2] EXACT 1:1 round-trip OK -> ~A~%" path)
+          path)))))
+
+;;; ------------------------------------------------------------------
+;;; M4 (7k8.4): the polished look. Draw the (zoomed) screen inset on a
+;;; padded background, masked to a rounded rectangle. All in one fragment shader:
+;;; a signed-distance rounded-box gives an antialiased edge; inside the box we
+;;; sample the zoomed source, outside we show the background.
+
+(defparameter +fs-compose+
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D tex;
+uniform float u_zoom;
+uniform vec2  u_center;    // pre-clamped focal point, source UV
+uniform vec2  u_canvas;    // output size in px (W,H)
+uniform float u_padding;   // inset margin, fraction of min(W,H)
+uniform float u_corner;    // rounded-rect radius, fraction of min(content dim)
+uniform vec3  u_bg;        // background colour
+
+// Signed distance to a rounded box centred at origin, half-size b, radius r.
+float sd_round_box(vec2 p, vec2 b, float r) {
+  vec2 q = abs(p) - b + vec2(r);
+  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+void main() {
+  vec2  P   = v_uv * u_canvas;                     // pixel coordinate
+  float m   = u_padding * min(u_canvas.x, u_canvas.y);
+  vec2  lo  = vec2(m);
+  vec2  hi  = u_canvas - vec2(m);
+  vec2  sz  = hi - lo;                             // content rect size
+  vec2  ctr = 0.5 * (lo + hi);
+  vec2  b   = 0.5 * sz;
+  float r   = u_corner * min(sz.x, sz.y);
+  float d   = sd_round_box(P - ctr, b, r);
+  float aa  = fwidth(d) + 1e-6;                    // ~1px antialiased edge
+  float ins = 1.0 - smoothstep(-aa, aa, d);
+  vec2  cuv = (P - lo) / sz;                       // UV within the inset rect
+  vec2  suv = u_center + (cuv - vec2(0.5)) / u_zoom;
+  vec3  screen = texture(tex, suv).rgb;
+  frag = vec4(mix(u_bg, screen, ins), 1.0);
+}")
+
+(defun draw-compose (program vao tex frame canvas-w canvas-h)
+  "Draw FRAME's zoomed screen inset on its background, rounded corners, into the
+bound FBO. CANVAS-W/H are the output size in pixels (needed for isotropic
+padding + circular corners)."
+  (let ((ec (kf:effective-center frame)))
+    (gl:use-program program)
+    (gl:active-texture :texture0)
+    (gl:bind-texture :texture-2d tex)
+    (flet ((uni (n) (gl:get-uniform-location program n)))
+      (let ((l (uni "tex")))       (when (>= l 0) (gl:uniformi l 0)))
+      (let ((l (uni "u_zoom")))    (when (>= l 0) (gl:uniformf l (float (kf:keyframe-zoom frame) 1.0))))
+      (let ((l (uni "u_center")))  (when (>= l 0) (gl:uniformf l (float (car ec) 1.0) (float (cdr ec) 1.0))))
+      (let ((l (uni "u_canvas")))  (when (>= l 0) (gl:uniformf l (float canvas-w 1.0) (float canvas-h 1.0))))
+      (let ((l (uni "u_padding"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-padding frame) 1.0))))
+      (let ((l (uni "u_corner")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-corner-radius frame) 1.0))))
+      (let ((l (uni "u_bg")))
+        (when (>= l 0)
+          (destructuring-bind (r g b) (kf:keyframe-bg-color frame)
+            (gl:uniformf l (float r 1.0) (float g 1.0) (float b 1.0))))))
+    (gl:bind-vertex-array vao)
+    (gl:draw-arrays :triangle-strip 0 4)))
+
+(defun compose-reduction-check (&key (width 256) (height 144)
+                                     (zoom 2.0) (center-x 0.6) (center-y 0.35))
+  "With padding=0 and corner=0 the compose shader must collapse to the verified
+M3 zoom. Check the interior (skip the 2px antialiased edge ring)."
+  (let* ((src   (make-gradient-pattern width height))
+         (frame (kf:make-keyframe :zoom zoom :center-x center-x :center-y center-y
+                                  :padding 0.0 :corner-radius 0.0 :bg-color '(0.0 0.0 0.0)))
+         (ec    (kf:effective-center frame)) (cx (car ec)) (cy (cdr ec)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let ((program (make-program +vs-passthrough+ +fs-compose+))
+            (vao     (make-fullscreen-quad))
+            (tex     (make-texture-rgba src width height)))
+        (gl:clear-color 0.0 0.0 0.0 1.0)
+        (gl:clear :color-buffer-bit)
+        (draw-compose program vao tex frame width height)
+        (gl:finish)
+        (let ((out (read-rgba width height)))
+          (multiple-value-bind (bad worst)
+              (verify-zoom src out width height zoom cx cy :border 2)
+            (format t "  [m4] reduction (pad0/corner0) bad=~D worst-delta=~D~%" bad worst)
+            (when (> bad (floor (* width height) 200))
+              (error "M4 does not reduce to M3 zoom: ~D interior pixels differ (worst ~D)"
+                     bad worst))
+            (format t "  [m4] reduces to M3 zoom on interior~%")
+            t))))))
+
+(defun compose-test (&key (width 320) (height 200)
+                          (zoom 1.4) (center-x 0.5) (center-y 0.5)
+                          (padding 0.07) (corner 0.12) (bg '(0.11 0.12 0.15))
+                          (path "/tmp/gs-m4-compose.png"))
+  "M4: render the full inset/background/rounded-corner composite over a gradient.
+Structural check: all four canvas corners (in the padding) must be background."
+  (let* ((src   (make-gradient-pattern width height))
+         (frame (kf:make-keyframe :zoom zoom :center-x center-x :center-y center-y
+                                  :padding padding :corner-radius corner :bg-color bg)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let ((program (make-program +vs-passthrough+ +fs-compose+))
+            (vao     (make-fullscreen-quad))
+            (tex     (make-texture-rgba src width height)))
+        (gl:clear-color 0.0 0.0 0.0 1.0)
+        (gl:clear :color-buffer-bit)
+        (draw-compose program vao tex frame width height)
+        (gl:finish)
+        (let ((out (read-rgba width height))
+              (bg8 (mapcar (lambda (c) (round (* 255 c))) bg)))
+          (save-rgba-png out width height path)
+          (flet ((px (r c) (let ((i (* 4 (+ (* r width) c))))
+                             (list (aref out i) (aref out (+ i 1)) (aref out (+ i 2)))))
+                 (near (a b) (every (lambda (x y) (<= (abs (- x y)) 2)) a b)))
+            (let* ((corners (list (px 0 0) (px 0 (1- width))
+                                  (px (1- height) 0) (px (1- height) (1- width))))
+                   (ok (count-if (lambda (p) (near p bg8)) corners)))
+              (format t "  [m4] bg=~A corners-are-bg=~D/4 -> ~A~%" bg8 ok path)
+              (when (< ok 4)
+                (error "M4: only ~D/4 canvas corners are background" ok))))
+          (format t "  [m4] composite OK~%")
           path)))))

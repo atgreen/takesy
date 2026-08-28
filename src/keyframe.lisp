@@ -16,6 +16,7 @@
   (:export #:keyframe #:make-keyframe #:copy-keyframe #:keyframe-p
            #:keyframe-time #:keyframe-zoom
            #:keyframe-center-x #:keyframe-center-y
+           #:keyframe-padding
            #:keyframe-corner-radius #:keyframe-shadow-blur #:keyframe-shadow-alpha
            #:keyframe-bg-color
            #:clamp-center #:effective-center))
@@ -26,7 +27,8 @@
   (time 0.0)                     ; seconds
   (zoom 1.0)                     ; >= 1.0
   (center-x 0.5) (center-y 0.5)  ; focal point, source UV space 0..1
-  (corner-radius 0.0)            ; M4: rounded-rect radius (fraction of min dim)
+  (padding 0.0)                  ; M4: inset margin, fraction of min canvas dim
+  (corner-radius 0.0)            ; M4: rounded-rect radius (fraction of min content dim)
   (shadow-blur 0.0)              ; M5: shadow softness
   (shadow-alpha 0.0)             ; M5: shadow opacity 0..1
   (bg-color '(0.0 0.0 0.0)))     ; M4: background (r g b), 0..1
