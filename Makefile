@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
 # SPDX-License-Identifier: MIT
-# takesy -- a Wayland-native screen recorder
+# takesy -- a screen recorder for modern Linux desktops (Wayland & X11)
 
 SBCL   ?= sbcl
 PREFIX ?= $(HOME)/.local

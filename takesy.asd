@@ -3,7 +3,7 @@
 ;;;; takesy.asd
 
 (asdf:defsystem "takesy"
-  :description "A Wayland-native screen recorder in Common Lisp."
+  :description "A screen recorder for modern Linux desktops (Wayland & X11), via xdg-desktop-portal + PipeWire."
   :depends-on ("takesy/dbus-fd" "takesy/pipewire"))
 
 (asdf:defsystem "takesy/pipewire"

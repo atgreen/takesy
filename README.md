@@ -1,5 +1,5 @@
 # Takesy
-> A Wayland-native screen recorder for Linux.
+> A screen recorder for modern Linux desktops (Wayland & X11).
 
 Takesy records your screen, automatically zooms in on wherever you're
 working, smooths the cursor motion, and composites a polished result —
@@ -7,7 +7,8 @@ padded background, rounded corners, and a drop shadow — to an mp4.
 
 ## Requirements
 
-- A Linux Wayland session with `xdg-desktop-portal` (GNOME, KDE, or wlroots)
+- A modern Linux desktop (Wayland or X11) with `xdg-desktop-portal` + PipeWire
+  (GNOME, KDE, or wlroots)
 - `ffmpeg` with an H.264 encoder (`libx264` or `libopenh264`)
 - [SBCL](https://www.sbcl.org/) and [ocicl](https://github.com/ocicl/ocicl) to
   build (dependencies resolve automatically)

@@ -1,6 +1,7 @@
 # AGENTS.md — working notes for takesy
 
-Guidance for any agent (or human) hacking on this Wayland-native screen recorder.
+Guidance for any agent (or human) hacking on this xdg-desktop-portal + PipeWire
+screen recorder (works on modern Linux desktops -- Wayland & X11).
 Read the **Hazards** section before running anything that opens a screencast.
 
 ## Project shape

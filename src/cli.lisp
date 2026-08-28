@@ -47,7 +47,7 @@ Signal a usage error on a malformed option."
 ;;; Subcommands.
 
 (defparameter +usage+
-  "takesy -- Wayland-native screen recorder (Common Lisp)
+  "takesy -- screen recorder for modern Linux desktops, Wayland & X11 (Common Lisp)
 
 Usage:
   takesy [options]           Capture your screen -> auto-zoom -> mp4.
