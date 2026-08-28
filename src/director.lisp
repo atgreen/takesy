@@ -22,7 +22,12 @@
            #:session-width #:session-height #:session-cursor #:session-events
            #:session-duration
            #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
-           #:*cursor-omega* #:spring-step #:ease-cursor))
+           #:*cursor-omega* #:spring-step #:ease-cursor
+           #:activity-segment #:make-activity-segment #:activity-segment-p
+           #:activity-segment-t-start #:activity-segment-t-end
+           #:activity-segment-focus-x #:activity-segment-focus-y
+           #:activity-segment-n-clicks #:activity-segment-n-keys
+           #:*activity-gap* #:detect-activity))
 
 (in-package #:takesy/director)
 
@@ -119,6 +124,55 @@ path lags the raw one and never overshoots a step."
             (spring-step py vy (cursor-sample-y cs) omega dt))
           (setf prev-t (cursor-sample-time cs))
           (push (make-cursor-sample :time prev-t :x px :y py) out))))))
+
+;;; ------------------------------------------------------------------
+;;; Activity detection. Cluster input events into bursts by time gap; each burst
+;;; becomes an activity segment the scheduler (D4) turns into a zoom. A segment's
+;;; spatial focus is the centroid of its clicks (where the user is working), or,
+;;; for key-only bursts, the cursor position at the burst's midpoint.
+
+(defstruct activity-segment
+  (t-start 0.0) (t-end 0.0)
+  (focus-x 0.0) (focus-y 0.0)   ; screen px
+  (n-clicks 0) (n-keys 0))
+
+(defparameter *activity-gap* 0.8
+  "Max seconds between consecutive events in one activity burst. REPL-tunable.")
+
+(defun %segment-from (session events)
+  "Build an activity-segment from a non-empty time-ordered EVENTS burst."
+  (let* ((ts     (input-event-time (first events)))
+         (te     (input-event-time (car (last events))))
+         (clicks (remove-if-not (lambda (e) (eq (input-event-kind e) :click)) events))
+         (nclk   (length clicks))
+         (nkey   (- (length events) nclk)))
+    (multiple-value-bind (fx fy)
+        (if (plusp nclk)
+            (values (/ (reduce #'+ clicks :key #'input-event-x) nclk)
+                    (/ (reduce #'+ clicks :key #'input-event-y) nclk))
+            (cursor-at session (* 0.5 (+ ts te))))
+      (make-activity-segment :t-start ts :t-end te
+                             :focus-x (float fx 1.0) :focus-y (float fy 1.0)
+                             :n-clicks nclk :n-keys nkey))))
+
+(defun detect-activity (session &key (gap *activity-gap*))
+  "Cluster SESSION's events into activity segments: a new segment starts whenever
+the gap to the previous event exceeds GAP. Return them in time order."
+  (let ((evs (sort (copy-list (session-events session)) #'<
+                   :key #'input-event-time)))
+    (when (null evs) (return-from detect-activity '()))
+    (let ((segments '()) (group '()) (last-t nil))
+      (flet ((flush ()
+               (when group
+                 (push (%segment-from session (nreverse group)) segments)
+                 (setf group '()))))
+        (dolist (ev evs)
+          (when (and last-t (> (- (input-event-time ev) last-t) gap))
+            (flush))
+          (push ev group)
+          (setf last-t (input-event-time ev)))
+        (flush))
+      (nreverse segments))))
 
 ;;; ------------------------------------------------------------------
 ;;; Synthetic fixtures. A deterministic session (no RNG, so tests are stable):
