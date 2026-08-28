@@ -29,8 +29,8 @@
            #:activity-segment-n-clicks #:activity-segment-n-keys
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
-           #:*zoom-level* #:*zoom-lead* #:*zoom-tail*
-           #:schedule-zooms #:plan-timeline))
+           #:*zoom-level* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
+           #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
 
@@ -187,7 +187,7 @@ the gap to the previous event exceeds GAP. Return them in time order."
 
 (defparameter *dwell-speed* 250.0
   "Cursor speed (px/s) at or below which the pointer counts as dwelling.")
-(defparameter *dwell-min* 0.4
+(defparameter *dwell-min* 0.6
   "Minimum dwell duration (s) to emit an activity segment. REPL-tunable.")
 
 (defun detect-dwell-activity (session &key (speed *dwell-speed*) (min-dwell *dwell-min*))
@@ -228,9 +228,26 @@ Each qualifying dwell yields a segment focused on the mean dwell position."
 ;;; polished convention. Output is a takesy/keyframe timeline, sorted and
 ;;; bracketed by wide frames at t=0 and the session end.
 
-(defparameter *zoom-level* 2.0 "Punch-in zoom factor for activity. REPL-tunable.")
+(defparameter *zoom-level* 1.8 "Punch-in zoom factor for activity. REPL-tunable.")
 (defparameter *zoom-lead*  0.5 "Seconds to begin zooming in before a segment.")
-(defparameter *zoom-tail*  0.6 "Seconds to stay zoomed after a segment before easing out.")
+(defparameter *zoom-tail*  0.8 "Seconds to stay zoomed after a segment before easing out.")
+(defparameter *zoom-merge-gap* 2.5
+  "Idle gap (s) below which adjacent activity stays zoomed and PANS between spots
+instead of zooming out and back in -- avoids constant in/out. REPL-tunable.")
+
+(defun merge-segments (segments gap)
+  "Group time-ordered SEGMENTS so any two separated by <= GAP seconds share a
+group. Each group becomes one sustained zoom that pans across its segments."
+  (when segments
+    (let ((groups '()) (cur (list (first segments))))
+      (dolist (s (rest segments))
+        (if (<= (- (activity-segment-t-start s)
+                   (activity-segment-t-end (first cur)))
+                gap)
+            (push s cur)
+            (progn (push (nreverse cur) groups) (setf cur (list s)))))
+      (push (nreverse cur) groups)
+      (nreverse groups))))
 
 (defun %clean-timeline (kfs)
   "Sort keyframes by time; where two collide in time (e.g. a clamped lead-in
@@ -248,9 +265,12 @@ meets the opening frame), keep the more-zoomed one so activity wins."
                             (padding 0.06) (corner 0.10)
                             (shadow-blur 0.05) (shadow-alpha 0.5)
                             (bg '(0.11 0.12 0.15)))
-  "Turn activity SEGMENTS into a keyframe timeline over SESSION's duration."
+  "Turn activity SEGMENTS into a keyframe timeline over SESSION's duration.
+Segments closer than *zoom-merge-gap* are merged into one sustained zoom that
+pans between them, so brief pauses don't cause the view to zoom out and back in."
   (let* ((w (session-width session)) (h (session-height session))
          (dur (session-duration session))
+         (groups (merge-segments segments *zoom-merge-gap*))
          (kfs '()))
     (flet ((frame (time zoom cx cy)
              (kf:make-keyframe :time (max 0.0 (min dur time))
@@ -259,13 +279,16 @@ meets the opening frame), keep the more-zoomed one so activity wins."
                                :shadow-blur shadow-blur :shadow-alpha shadow-alpha
                                :bg-color bg)))
       (push (frame 0.0 1.0 0.5 0.5) kfs)                 ; open wide
-      (dolist (seg segments)
-        (multiple-value-bind (fx fy)
-            (px->uv (activity-segment-focus-x seg) (activity-segment-focus-y seg) w h)
-          (push (frame (- (activity-segment-t-start seg) lead) 1.0 0.5 0.5) kfs)
-          (push (frame (activity-segment-t-start seg) zoom fx fy) kfs)  ; zoomed in
-          (push (frame (activity-segment-t-end seg)   zoom fx fy) kfs)  ; hold
-          (push (frame (+ (activity-segment-t-end seg) tail) 1.0 0.5 0.5) kfs))) ; ease out
+      (dolist (g groups)
+        (let ((g-start (activity-segment-t-start (first g)))
+              (g-end   (activity-segment-t-end (car (last g)))))
+          (push (frame (- g-start lead) 1.0 0.5 0.5) kfs)   ; ease in once per group
+          (dolist (seg g)                                   ; pan across the group's spots
+            (multiple-value-bind (fx fy)
+                (px->uv (activity-segment-focus-x seg) (activity-segment-focus-y seg) w h)
+              (push (frame (activity-segment-t-start seg) zoom fx fy) kfs)
+              (push (frame (activity-segment-t-end seg)   zoom fx fy) kfs)))
+          (push (frame (+ g-end tail) 1.0 0.5 0.5) kfs)))   ; ease out once per group
       (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
       (%clean-timeline (nreverse kfs)))))
 
