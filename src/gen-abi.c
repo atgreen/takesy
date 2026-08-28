@@ -133,6 +133,11 @@ int main(void)
     printf("\n;;; --- ParamMeta / ParamBuffers keys ---\n");
     C("spa-param-meta-type", SPA_PARAM_META_type);
     C("spa-param-meta-size", SPA_PARAM_META_size);
+    C("spa-param-buffers-buffers", SPA_PARAM_BUFFERS_buffers);
+    C("spa-param-buffers-blocks", SPA_PARAM_BUFFERS_blocks);
+    C("spa-param-buffers-size", SPA_PARAM_BUFFERS_size);
+    C("spa-param-buffers-stride", SPA_PARAM_BUFFERS_stride);
+    C("spa-param-buffers-datatype", SPA_PARAM_BUFFERS_dataType);
 
     printf("\n;;; --- video formats (BGRA/RGBA family) ---\n");
     C("spa-video-format-rgb", SPA_VIDEO_FORMAT_RGB);

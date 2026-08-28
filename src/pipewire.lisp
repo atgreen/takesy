@@ -1,0 +1,248 @@
+;;;; pipewire.lisp
+;;;;
+;;;; Bead green-screen-jme: capture one frame (+ cursor position) from a portal
+;;;; PipeWire node, in pure Lisp. Flow:
+;;;;
+;;;;   pw_init -> main_loop -> context -> connect_fd(portal fd)
+;;;;   -> stream_new -> add_listener(events) -> stream_connect(node, EnumFormat)
+;;;;   -> run loop:
+;;;;        param_changed(Format) -> parse w/h/fmt -> update_params(Buffers+Cursor)
+;;;;        process             -> dequeue -> copy pixels + cursor -> quit
+;;;;   -> ffmpeg raw -> PNG
+
+(in-package #:green-screen/pipewire)
+
+;;; ------------------------------------------------------------------
+;;; Foreign read helpers.
+
+(declaim (inline ptr+ u32@ i32@ ptr@))
+(defun ptr+ (p n) (cffi:inc-pointer p n))
+(defun u32@ (p off) (cffi:mem-ref (ptr+ p off) :uint32))
+(defun i32@ (p off) (cffi:mem-ref (ptr+ p off) :int32))
+(defun ptr@ (p off) (cffi:mem-ref (ptr+ p off) :pointer))
+(defun round-up (n m) (* m (ceiling n m)))
+
+;;; ------------------------------------------------------------------
+;;; Capture state, shared with the C callbacks via a special var. One capture
+;;; runs at a time on the loop thread, so a dynamic binding is sufficient.
+
+(defstruct capture
+  loop stream raw-path
+  (width 0) (height 0) (format 0) (stride 0)
+  cursor-x cursor-y
+  (done nil) (error nil) (n-empty 0))
+
+(defvar *cap* nil)
+
+;;; ------------------------------------------------------------------
+;;; Parse a fixated Format object POD -> width, height, video-format.
+
+(defun scalar-offset (pod off)
+  "Offset of a prop's scalar value body. Compositors wrap fixated values in a
+Choice(None), so unwrap it: skip choice_type+flags+child-header (16 bytes)."
+  (let ((vtype (u32@ pod (+ off 12)))   ; value POD type
+        (vbody (+ off 16)))             ; value POD body
+    (if (= vtype +spa-type-choice+)
+        (+ vbody 16)
+        vbody)))
+
+(defun parse-format (pod)
+  (let ((end (+ 8 (u32@ pod 0)))   ; 8-byte header + body size
+        (off 16)                   ; props begin after obj type+id
+        (w 0) (h 0) (fmt 0))
+    (loop while (< off end) do
+      (let ((key   (u32@ pod off))
+            (vsize (u32@ pod (+ off 8))))   ; value POD body size
+        (cond ((= key +spa-format-video-format+)
+               (setf fmt (u32@ pod (scalar-offset pod off))))
+              ((= key +spa-format-video-size+)
+               (let ((so (scalar-offset pod off)))
+                 (setf w (u32@ pod so) h (u32@ pod (+ so 4))))))
+        (incf off (round-up (+ 16 vsize) 8))))
+    (values w h fmt)))
+
+;;; ------------------------------------------------------------------
+;;; Read SPA_META_Cursor position from a spa_buffer.
+
+(defun read-cursor (spabuf)
+  (let ((n     (u32@ spabuf +off/spa-buffer/n-metas+))
+        (metas (ptr@ spabuf +off/spa-buffer/metas+)))
+    (dotimes (i n (values nil nil))
+      (let ((m (ptr+ metas (* i +sz/spa-meta+))))
+        (when (= (u32@ m +off/spa-meta/type+) +spa-meta-cursor+)
+          (let ((md (ptr@ m +off/spa-meta/data+)))
+            (when (/= (u32@ md +off/spa-meta-cursor/id+) 0)
+              (let ((pos (ptr+ md +off/spa-meta-cursor/position+)))
+                (return-from read-cursor
+                  (values (i32@ pos +off/spa-point/x+)
+                          (i32@ pos +off/spa-point/y+)))))))))))
+
+;;; ------------------------------------------------------------------
+;;; Callbacks.
+
+(cffi:defcallback cb-state-changed :void
+    ((data :pointer) (old :int) (state :int) (error :pointer))
+  (declare (ignore data old))
+  (when *cap*
+    (when (and (= state +pw-stream-state-error+) (not (cffi:null-pointer-p error)))
+      (setf (capture-error *cap*) (cffi:foreign-string-to-lisp error)))
+    (format t "  [pw] state -> ~A~@[ (~A)~]~%"
+            (cond ((= state +pw-stream-state-streaming+) "streaming")
+                  ((= state +pw-stream-state-paused+) "paused")
+                  ((= state +pw-stream-state-connecting+) "connecting")
+                  ((= state +pw-stream-state-unconnected+) "unconnected")
+                  ((= state +pw-stream-state-error+) "error")
+                  (t state))
+            (capture-error *cap*))))
+
+(cffi:defcallback cb-param-changed :void
+    ((data :pointer) (id :uint32) (param :pointer))
+  (declare (ignore data))
+  (when (and *cap* (= id +spa-param-format+) (not (cffi:null-pointer-p param)))
+    ;; Dump the real fixated format POD for offline parser diagnosis.
+    (let* ((total (+ 8 (u32@ param 0)))
+           (v (make-array total :element-type '(unsigned-byte 8))))
+      (cffi:with-pointer-to-vector-data (d v)
+        (cffi:foreign-funcall "memcpy" :pointer d :pointer param :size total :pointer))
+      (ignore-errors
+       (with-open-file (s "/tmp/gs-format-param.bin" :direction :output
+                                                     :element-type '(unsigned-byte 8)
+                                                     :if-exists :supersede)
+         (write-sequence v s))))
+    (multiple-value-bind (w h fmt) (parse-format param)
+      (setf (capture-width *cap*) w (capture-height *cap*) h (capture-format *cap*) fmt)
+      (let* ((stride (* w 4))
+             (size (* stride h))
+             (bufpod (octets->foreign (build-buffers-pod stride size)))
+             (curpod (octets->foreign (build-cursor-meta-pod)))
+             (arr (cffi:foreign-alloc :pointer :count 2)))
+        (setf (capture-stride *cap*) stride)
+        (setf (cffi:mem-aref arr :pointer 0) bufpod
+              (cffi:mem-aref arr :pointer 1) curpod)
+        (pw-stream-update-params (capture-stream *cap*) arr 2)
+        (cffi:foreign-free arr)
+        (cffi:foreign-free bufpod)
+        (cffi:foreign-free curpod)
+        (format t "  [pw] negotiated ~Dx~D fmt=~D~%" w h fmt)))))
+
+(cffi:defcallback cb-process :void ((data :pointer))
+  (declare (ignore data))
+  (let* ((cap *cap*)
+         (stream (capture-stream cap))
+         (b (pw-stream-dequeue-buffer stream)))
+    (unless (cffi:null-pointer-p b)
+      (let* ((spabuf (ptr@ b +off/pw-buffer/buffer+))
+             (data0  (ptr@ spabuf +off/spa-buffer/datas+))
+             (chunk  (ptr@ data0 +off/spa-data/chunk+))
+             (dptr   (ptr@ data0 +off/spa-data/data+))
+             (csize   (u32@ chunk +off/spa-chunk/size+))
+             (cstride (i32@ chunk +off/spa-chunk/stride+))
+             (coff    (u32@ chunk +off/spa-chunk/offset+)))
+        (cond
+          ((and (not (cffi:null-pointer-p dptr)) (> csize 0))
+           ;; Chunk stride/size are ground truth for geometry (32bpp packed).
+           (when (> cstride 0)
+             (setf (capture-stride cap) cstride
+                   (capture-width cap)  (floor cstride 4)
+                   (capture-height cap) (floor csize cstride)))
+           (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
+             (cffi:with-pointer-to-vector-data (dst vec)
+               (cffi:foreign-funcall "memcpy" :pointer dst
+                                     :pointer (ptr+ dptr coff) :size csize :pointer))
+             (with-open-file (s (capture-raw-path cap) :direction :output
+                                                       :element-type '(unsigned-byte 8)
+                                                       :if-exists :supersede)
+               (write-sequence vec s)))
+           (multiple-value-bind (cx cy) (read-cursor spabuf)
+             (setf (capture-cursor-x cap) cx (capture-cursor-y cap) cy))
+           (setf (capture-done cap) t)
+           (pw-stream-queue-buffer stream b)
+           (pw-main-loop-quit (capture-loop cap)))
+          (t
+           ;; screencast often emits a few empty buffers first; skip them.
+           (incf (capture-n-empty cap))
+           (pw-stream-queue-buffer stream b)))))))
+
+;;; ------------------------------------------------------------------
+;;; Events struct assembly.
+
+(defun make-stream-events ()
+  (let ((ev (cffi:foreign-alloc :uint8 :count +sz/pw-stream-events+)))
+    (dotimes (i +sz/pw-stream-events+) (setf (cffi:mem-aref ev :uint8 i) 0))
+    (setf (cffi:mem-ref (ptr+ ev +off/pw-stream-events/version+) :uint32)
+          +pw-version-stream-events+)
+    (setf (cffi:mem-ref (ptr+ ev +off/pw-stream-events/state-changed+) :pointer)
+          (cffi:get-callback 'cb-state-changed))
+    (setf (cffi:mem-ref (ptr+ ev +off/pw-stream-events/param-changed+) :pointer)
+          (cffi:get-callback 'cb-param-changed))
+    (setf (cffi:mem-ref (ptr+ ev +off/pw-stream-events/process+) :pointer)
+          (cffi:get-callback 'cb-process))
+    ev))
+
+;;; ------------------------------------------------------------------
+;;; Driver.
+
+(defun capture-one-frame (fd node-id raw-path)
+  "Connect to NODE-ID over the portal FD, capture one frame to RAW-PATH.
+Return the CAPTURE struct (width/height/format/stride/cursor)."
+  (pw-init (cffi:null-pointer) (cffi:null-pointer))
+  (let* ((mloop (pw-main-loop-new (cffi:null-pointer)))
+         (l     (pw-main-loop-get-loop mloop))
+         (ctx   (pw-context-new l (cffi:null-pointer) 0))
+         (core  (pw-context-connect-fd ctx fd (cffi:null-pointer) 0)))
+    (when (cffi:null-pointer-p core)
+      (error "pw_context_connect_fd failed on fd ~D" fd))
+    (let* ((props  (make-properties "media.type" "Video"
+                                    "media.category" "Capture"
+                                    "media.role" "Screen"))
+           (stream (pw-stream-new core "green-screen-capture" props))
+           (hook   (cffi:foreign-alloc :uint8 :count +sz/spa-hook+))
+           (events (make-stream-events))
+           (cap    (make-capture :loop mloop :stream stream :raw-path raw-path)))
+      (dotimes (i +sz/spa-hook+) (setf (cffi:mem-aref hook :uint8 i) 0))
+      (let ((*cap* cap))
+        (pw-stream-add-listener stream hook events (cffi:null-pointer))
+        (let* ((fmt-pod (octets->foreign (build-enum-format-pod)))
+               (params  (cffi:foreign-alloc :pointer :count 1))
+               (flags   (logior +pw-stream-flag-autoconnect+
+                                 +pw-stream-flag-map-buffers+)))
+          (setf (cffi:mem-aref params :pointer 0) fmt-pod)
+          (pw-stream-connect stream +spa-direction-input+ node-id flags params 1)
+          (cffi:foreign-free params)
+          (cffi:foreign-free fmt-pod))
+        (pw-main-loop-run mloop))
+      (pw-stream-destroy stream)
+      (pw-context-destroy ctx)
+      (pw-main-loop-destroy mloop)
+      cap)))
+
+(defun format->ffmpeg-pixfmt (fmt)
+  (cond ((= fmt +spa-video-format-bgrx+) "bgr0")
+        ((= fmt +spa-video-format-rgbx+) "rgb0")
+        ((= fmt +spa-video-format-bgra+) "bgra")
+        ((= fmt +spa-video-format-rgba+) "rgba")
+        ((= fmt +spa-video-format-xrgb+) "0rgb")
+        ((= fmt +spa-video-format-argb+) "argb")
+        (t "bgr0")))
+
+(defun capture-frame-to-png (fd node-id png-path)
+  "Capture one frame from NODE-ID (via portal FD) and write PNG-PATH.
+Return a plist describing the frame."
+  (let* ((raw (format nil "~A.raw" png-path))
+         (cap (capture-one-frame fd node-id raw)))
+    (unless (capture-done cap)
+      (error "no frame captured (empty buffers: ~D, error: ~A)"
+             (capture-n-empty cap) (capture-error cap)))
+    (let ((w (capture-width cap)) (h (capture-height cap)))
+      (uiop:run-program
+       (list "ffmpeg" "-y" "-loglevel" "error"
+             "-f" "rawvideo"
+             "-pix_fmt" (format->ffmpeg-pixfmt (capture-format cap))
+             "-s" (format nil "~Dx~D" w h)
+             "-i" raw
+             "-frames:v" "1" png-path)
+       :output t :error-output t)
+      (list :width w :height h :format (capture-format cap)
+            :stride (capture-stride cap)
+            :cursor-x (capture-cursor-x cap) :cursor-y (capture-cursor-y cap)
+            :png png-path))))

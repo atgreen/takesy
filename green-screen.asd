@@ -10,7 +10,9 @@
   :serial t
   :components ((:module "src"
                 :components ((:file "pipewire-package")
-                             (:file "pw-abi")))))
+                             (:file "pw-abi")
+                             (:file "spa-pod")
+                             (:file "pipewire")))))
 
 (asdf:defsystem "green-screen/dbus-fd"
   :description "SCM_RIGHTS Unix-fd passing extension for the CL dbus client."

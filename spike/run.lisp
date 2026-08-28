@@ -13,9 +13,9 @@
  (list :source-registry (list :directory (uiop:getcwd)) :inherit-configuration))
 
 (handler-case
-    (asdf:load-system "green-screen/dbus-fd")
+    (asdf:load-system "green-screen")
   (error (e)
-    (format *error-output* "~&Failed to load green-screen/dbus-fd: ~A~%~
+    (format *error-output* "~&Failed to load green-screen: ~A~%~
                             Ensure deps are installed (ocicl install dbus cffi flexi-streams).~%" e)
     (uiop:quit 1)))
 

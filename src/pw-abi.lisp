@@ -97,6 +97,11 @@
 ;;; --- ParamMeta / ParamBuffers keys ---
 (defconstant +spa-param-meta-type+ 1)
 (defconstant +spa-param-meta-size+ 2)
+(defconstant +spa-param-buffers-buffers+ 1)
+(defconstant +spa-param-buffers-blocks+ 2)
+(defconstant +spa-param-buffers-size+ 3)
+(defconstant +spa-param-buffers-stride+ 4)
+(defconstant +spa-param-buffers-datatype+ 6)
 
 ;;; --- video formats (BGRA/RGBA family) ---
 (defconstant +spa-video-format-rgb+ 15)

@@ -13,7 +13,7 @@
 (defpackage #:green-screen/pipewire
   (:use #:cl)
   (:nicknames #:gs-pw)
-  (:export #:capture-one-frame))
+  (:export #:capture-one-frame #:capture-frame-to-png))
 
 (in-package #:green-screen/pipewire)
 
@@ -80,6 +80,9 @@
 
 (cffi:defcfun ("pw_stream_queue_buffer" pw-stream-queue-buffer) :int
   (stream :pointer) (buffer :pointer))
+
+(cffi:defcfun ("pw_stream_update_params" pw-stream-update-params) :int
+  (stream :pointer) (params :pointer) (n-params :uint32))
 
 (cffi:defcfun ("pw_stream_get_state" pw-stream-get-state) :int
   (stream :pointer) (error :pointer))

@@ -167,29 +167,32 @@ On decode a variant unpacks to its bare value, so an entry is (key value)."
                        bus "Start" "osa{sv}"
                        (lambda (tok)
                          (list session "" (sv "handle_token" "s" tok)))))
-             (streams (dict-get results "streams")))
+             (streams (dict-get results "streams"))
+             (node-id (first (first streams))))
         (format t "~%==> SUCCESS. PipeWire streams from portal:~%")
         (dolist (s streams)
           ;; each stream is (node_id::u properties::a{sv})
-          (destructuring-bind (node-id props) s
-            (format t "      node id = ~A   props = ~S~%" node-id props)))
+          (destructuring-bind (nid props) s
+            (format t "      node id = ~A   props = ~S~%" nid props)))
 
         ;; 4. OpenPipeWireRemote --------------------------------------------
-        ;; Returns the PipeWire fd via SCM_RIGHTS. With the fd-passing upgrade
-        ;; we now actually retrieve the descriptor (bead green-screen-sz0).
+        ;; Returns the PipeWire fd via SCM_RIGHTS (bead green-screen-sz0).
         (format t "~&[4/4] OpenPipeWireRemote (retrieving real fd)...~%")
-        (let ((h-index (call-portal bus "OpenPipeWireRemote" "oa{sv}"
-                                    (list session (sv))))
-              (fd (green-screen/dbus-fd:take-fd bus)))
-          (format t "      body 'h' index = ~S~%" h-index)
-          (format t "      captured fd    = ~S~%" fd)
-          (if (and (integerp fd) (>= fd 0))
-              (let ((st (sb-posix:fstat fd)))
-                (format t "      ==> REAL fd: fstat ok, st_mode=#o~O (S_IFSOCK=#o140000)~%"
-                        (sb-posix:stat-mode st))
-                (format t "~%Spike complete: LIVE PipeWire fd ~D retrieved through the CL~%" fd)
-                (format t "dbus stack. Native capture is unblocked.~%"))
-              (progn
-                (format t "      No fd captured -- fd passing did not yield a descriptor.~%")
-                (error "OpenPipeWireRemote did not deliver a usable fd."))))
+        (let ((fd (progn
+                    (call-portal bus "OpenPipeWireRemote" "oa{sv}" (list session (sv)))
+                    (green-screen/dbus-fd:take-fd bus))))
+          (format t "      captured fd = ~S (node ~A)~%" fd node-id)
+          (unless (and (integerp fd) (>= fd 0))
+            (error "OpenPipeWireRemote did not deliver a usable fd."))
+
+          ;; 5. Native PipeWire capture: one frame + cursor (bead jme).
+          (format t "~&[5/5] Capturing one frame via pure-Lisp libpipewire...~%")
+          (let ((info (green-screen/pipewire:capture-frame-to-png
+                       fd node-id "/tmp/green-screen-frame.png")))
+            (format t "~%==> FRAME CAPTURED: ~Dx~D fmt=~A stride=~A~%"
+                    (getf info :width) (getf info :height)
+                    (getf info :format) (getf info :stride))
+            (format t "    cursor = ~@[(~A,~A)~]~:[ (none)~;~]~%"
+                    (getf info :cursor-x) (getf info :cursor-y) (getf info :cursor-x))
+            (format t "    PNG    = ~A~%" (getf info :png))))
         (values)))))
