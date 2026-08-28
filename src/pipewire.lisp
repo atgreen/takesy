@@ -40,7 +40,7 @@
   ;; record-start is nil until the first frame actually arrives (the clock starts
   ;; then, so negotiation latency doesn't shorten the clip -- bead am4.7).
   (record-start nil) (record-duration 0) (record-min-dt 0) (record-last nil)
-  (max-frames 0) (n-saved 0) (frames '())
+  (record-budget 0) (max-frames 0) (n-saved 0) (frames '())
   (done nil) (error nil) (n-empty 0))
 
 (defvar *cap* nil)
@@ -172,7 +172,24 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
     ;; Start the clock on the first real frame so DURATION is wall-clock of
     ;; actual capture, not shortened by portal/PipeWire negotiation (am4.7).
     (unless (capture-record-start cap)
-      (setf (capture-record-start cap) now))
+      (setf (capture-record-start cap) now)
+      ;; Now the frame size is known: bound the frame count to the disk budget
+      ;; and SPREAD it across the requested duration, so a busy screen doesn't
+      ;; blow the budget in a few seconds (am4.17). We keep full-res frames and
+      ;; lower the rate rather than shrink them (sharpness > smoothness here).
+      (let* ((fbytes (max 1 csize))
+             (cap-frames (max 1 (floor (capture-record-budget cap) fbytes)))
+             (dur-units  (capture-record-duration cap))
+             (spread-dt  (if (plusp dur-units) (floor dur-units cap-frames) 0)))
+        (setf (capture-max-frames cap) cap-frames
+              (capture-record-min-dt cap)
+              (max (capture-record-min-dt cap) spread-dt))
+        (format t "  [pw] disk budget: up to ~D full-res frames ~
+                   (~,1F fps over ~,0Fs)~%"
+                cap-frames
+                (/ internal-time-units-per-second
+                   (float (max 1 (capture-record-min-dt cap)) 1.0))
+                (/ dur-units internal-time-units-per-second 1.0))))
     (let ((deadline (+ (capture-record-start cap) (capture-record-duration cap))))
      (cond
       ;; safety caps: the max duration elapsed, or the frame backstop was hit
@@ -331,27 +348,43 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
       (%run-and-teardown mloop ctx stream node-id cap)
       cap)))
 
-(defun record-frames (fd node-id &key (duration 30.0) (max-fps 30) (max-frames 250)
+(defun %free-bytes (dir)
+  "Best-effort free bytes on DIR's filesystem via df; NIL if it can't be read."
+  (ignore-errors
+    (let* ((out (with-output-to-string (s)
+                  (uiop:run-program (list "df" "-B1" "--output=avail" dir)
+                                    :output s :error-output nil :ignore-error-status t)))
+           (lines (remove "" (uiop:split-string out :separator '(#\Newline)) :test #'string=)))
+      (parse-integer (string-trim " " (car (last lines))) :junk-allowed t))))
+
+(defun record-frames (fd node-id &key (duration 30.0) (max-fps 30)
+                                      (disk-budget nil)
                                       (dir "/tmp/takesy-rec"))
   "Record from NODE-ID into DIR until the user ends the share (stream drops after
-streaming -- cb-state-changed quits the loop), or one of the safety caps trips:
-DURATION seconds (from the first frame) or MAX-FRAMES kept frames (4K frames are
-~37MB each). Saves one BGRx file per kept frame (throttled to MAX-FPS) plus a
-per-frame cursor track. Return a plist (:width :height :stride :format :fps :dir
-:frames); :frames is a list of (:i :time :cursor-x :cursor-y :path) in order."
+streaming -- cb-state-changed quits the loop) or DURATION seconds elapse. Frames
+are full-res BGRx (~37MB each at 4K), so the number kept is bounded by DISK-BUDGET
+bytes and spread across the whole DURATION (the effective rate drops below MAX-FPS
+when needed) -- so a busy screen fills the clip, not the disk in a few seconds.
+Return a plist (:width :height :stride :format :fps :dir :frames)."
   (ensure-directories-exist (concatenate 'string (string-right-trim "/" dir) "/"))
   ;; clear stale frames from a previous recording so disk use stays bounded
   (dolist (f (directory (merge-pathnames "frame-*.bgrx"
                                          (concatenate 'string (string-right-trim "/" dir) "/"))))
     (ignore-errors (delete-file f)))
-  (multiple-value-bind (mloop ctx stream) (%open-stream fd node-id)
+  ;; default budget: 70% of free space (best-effort), capped at 12 GB.
+  (let ((budget (min 12000000000
+                     (or disk-budget
+                         (let ((free (%free-bytes dir)))
+                           (if free (round (* 0.70 free)) 8000000000))))))
+   (multiple-value-bind (mloop ctx stream) (%open-stream fd node-id)
     (let* ((cap (make-capture :loop mloop :stream stream
                               :record-p t
                               :record-dir (string-right-trim "/" dir)
-                              ;; clock starts on the first frame (%record-frame)
+                              ;; clock + frame budget are finalised on the first
+                              ;; frame in %record-frame (size known then)
                               :record-duration
                               (round (* duration internal-time-units-per-second))
-                              :max-frames max-frames
+                              :record-budget budget
                               :record-min-dt
                               (round (/ internal-time-units-per-second (max 1 max-fps))))))
       (%run-and-teardown mloop ctx stream node-id cap)
@@ -367,7 +400,7 @@ per-frame cursor track. Return a plist (:width :height :stride :format :fps :dir
                            :direction :output :if-exists :supersede
                            :if-does-not-exist :create)
           (with-standard-io-syntax (prin1 recording s)))
-        recording))))
+        recording)))))
 
 (defun load-recording (dir)
   "Read the manifest written by RECORD-FRAMES back into a recording plist."
