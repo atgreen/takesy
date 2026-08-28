@@ -1,9 +1,30 @@
-# Takesy
+# takesy
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 > A screen recorder for modern Linux desktops (Wayland & X11).
 
-Takesy records your screen, automatically zooms in on wherever you're
-working, smooths the cursor motion, and composites a polished result —
-padded background, rounded corners, and a drop shadow — to an mp4.
+**takesy** records your screen and turns it into a polished screencast: it
+automatically zooms in on wherever you're working, smooths the cursor motion,
+and composites the result — padded background, rounded corners, drop shadow — to
+an mp4. No timeline, no manual keyframing; just record, and takesy directs the
+shot for you.
+
+<!-- Demo: drop a clip here, e.g. ![takesy demo](docs/demo.gif) -->
+
+## Features
+
+- **Auto-zoom on activity** — punches in where you're working, pans between
+  spots, and eases back out.
+- **Never crops the action** — watches the screen (frame diffs) and fits the
+  zoom to the active region, so relevant changes always stay in frame.
+- **Smoothed cursor** — a speed-adaptive spring that aims at your clicks (cutting
+  the usual overshoot) yet stays responsive when you point at things.
+- **Polished compositing** — the screen inset on a padded background with rounded
+  corners and a soft drop shadow.
+- **Click to stop** — record for as long as you like; finish with your desktop's
+  screencast Stop button.
+- **One self-contained binary** — builds to a single `takesy` executable.
 
 ## Requirements
 
@@ -16,41 +37,47 @@ padded background, rounded corners, and a drop shadow — to an mp4.
 ## Build
 
 ```sh
-sbcl --script build.lisp     # produces ./takesy
+make                # -> ./takesy   (or: sbcl --script build.lisp)
+make install        # copies takesy to ~/.local/bin
 ```
 
-## Record
+## Usage
 
 ```sh
-./takesy                            # record; click Stop in the top bar to finish
-./takesy --output demo.mp4 --duration 20
-./takesy help
+takesy                                 # record; click Stop in the top bar to finish
+takesy --output talk.mp4 --duration 20
+takesy help
 ```
 
 Pick a source in the screen-share dialog, do your thing, then click your
-desktop's screencast **Stop** button in the top bar to finish. The cursor is
-hidden during capture (takesy needs its position to drive the auto-zoom) and is
-restored when you're done.
+desktop's screencast **Stop** button to finish. The cursor is hidden during
+capture — takesy needs its position to drive the auto-zoom — and restored when
+you're done. (If you haven't run `make install`, invoke it as `./takesy`.)
 
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--output PATH` | output mp4 | `/tmp/takesy-record.mp4` |
-| `--duration S` | maximum length (a safety cap; you decide the length by clicking Stop) | 30 |
-| `--fps N` | output frame rate | 24 |
-| `--scale K` | downsample the output to 1/K of the captured resolution | 3 |
+| `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
+| `--fps N` | output frame rate | `24` |
+| `--scale K` | downsample the output to 1/K of the captured resolution | `3` |
 
 ## How it works
 
-1. **Capture** — records frames and the cursor position over
+1. **Capture** — receives frames and the cursor position over
    `xdg-desktop-portal` + PipeWire.
-2. **Direct** — finds where you focused, plans smooth auto-zoom moves, and eases
-   the cursor (aiming at where you click, staying responsive when you point).
-3. **Composite** — GPU-renders the zoom, padded background, rounded corners,
-   drop shadow, and cursor overlay, then encodes to an mp4 with `ffmpeg`.
+2. **Direct** (pure Lisp) — detects where you focused, plans eased auto-zoom
+   keyframes fit to the active region, and smooths the cursor path.
+3. **Composite** (GPU) — renders the zoom, background, rounded corners, drop
+   shadow, and cursor overlay with EGL/OpenGL, then encodes to an mp4 via
+   `ffmpeg`.
 
-Author and License
--------------------
+## Customizing
 
-``takesy`` was created by [Anthony Green](https://github.com/atgreen)
-and is distributed under the MIT license.
+The direction is tunable from the Lisp side — for example
+`takesy/director:*zoom-level*`, `*zoom-merge-gap*`, `*cursor-omega-fast*`, and
+`*cursor-anticipate*` — so you can dial the zoom and cursor feel to taste.
 
+## License
+
+Created by [Anthony Green](https://github.com/atgreen); distributed under the
+[MIT license](LICENSE).
