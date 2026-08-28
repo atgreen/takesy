@@ -10,10 +10,12 @@
 
 (defpackage #:green-screen/compositor
   (:use #:cl)
-  (:local-nicknames (#:egl #:green-screen/egl))
-  (:export #:bringup-test #:texture-1to1-test
+  (:local-nicknames (#:egl #:green-screen/egl)
+                    (#:kf  #:green-screen/keyframe))
+  (:export #:bringup-test #:texture-1to1-test #:zoom-crop-test
            #:compile-shader #:make-program #:make-fullscreen-quad
-           #:make-texture-rgba #:draw-textured-quad #:make-test-pattern))
+           #:make-texture-rgba #:draw-textured-quad #:draw-zoom
+           #:make-test-pattern #:make-gradient-pattern))
 
 (in-package #:green-screen/compositor)
 
@@ -195,6 +197,108 @@ top-left quadrant in B. Distinct per pixel so a 1:1 compare is meaningful."
                 (aref v (+ i 2)) (if (and (< x (floor w 2)) (< y (floor h 2))) 200 40)
                 (aref v (+ i 3)) 255))))
     v))
+
+;;; ------------------------------------------------------------------
+;;; M3 (7k8.3): zoom/pan. The fragment shader samples a sub-window of the source
+;;; -- centred on the keyframe focal point, sized 1/zoom -- and maps it to the
+;;; full output. This is the polished "punch in on the action" transform.
+
+(defparameter +fs-zoom+
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D tex;
+uniform float u_zoom;      // >= 1
+uniform vec2  u_center;    // focal point in source UV, pre-clamped
+void main() {
+  vec2 uv = u_center + (v_uv - vec2(0.5)) / u_zoom;
+  frag = texture(tex, uv);
+}")
+
+(defun draw-zoom (program vao tex zoom center-x center-y)
+  "Draw the source texture zoomed by ZOOM about (CENTER-X,CENTER-Y) in source UV."
+  (gl:use-program program)
+  (gl:active-texture :texture0)
+  (gl:bind-texture :texture-2d tex)
+  (flet ((uni (name) (gl:get-uniform-location program name)))
+    (let ((l (uni "tex")))      (when (>= l 0) (gl:uniformi l 0)))
+    (let ((l (uni "u_zoom")))   (when (>= l 0) (gl:uniformf l (float zoom 1.0))))
+    (let ((l (uni "u_center"))) (when (>= l 0)
+                                  (gl:uniformf l (float center-x 1.0) (float center-y 1.0)))))
+  (gl:bind-vertex-array vao)
+  (gl:draw-arrays :triangle-strip 0 4))
+
+(defun make-gradient-pattern (w h)
+  "Smooth RGBA gradient: R ramps with x, G ramps with y, B constant. Adjacent
+pixels differ by ~1, so a nearest-sample check tolerates GPU/CPU float rounding
+at texel boundaries without the discontinuities of a wrapping pattern."
+  (let ((v (make-array (* w h 4) :element-type '(unsigned-byte 8))))
+    (dotimes (y h)
+      (dotimes (x w)
+        (let ((i (* 4 (+ (* y w) x))))
+          (setf (aref v (+ i 0)) (floor (* x 255) (max 1 (1- w)))
+                (aref v (+ i 1)) (floor (* y 255) (max 1 (1- h)))
+                (aref v (+ i 2)) 128
+                (aref v (+ i 3)) 255))))
+    v))
+
+(defun sample-nearest (src w h u v)
+  "Nearest-sample SRC (RGBA, data row 0 = texture v=0) at UV with clamp-to-edge.
+Return the R,G,B bytes."
+  (let* ((sx (min (1- w) (max 0 (floor (* u w)))))
+         (sy (min (1- h) (max 0 (floor (* v h)))))
+         (i  (* 4 (+ (* sy w) sx))))
+    (values (aref src i) (aref src (+ i 1)) (aref src (+ i 2)))))
+
+(defun verify-zoom (src out w h zoom cx cy &key (tol 3))
+  "Compare every output pixel against the predicted nearest-sample of SRC under
+the zoom/pan transform. Readback row r <-> output uv.v=(r+0.5)/h (bottom-origin,
+matching glReadPixels); col c <-> uv.u=(c+0.5)/w. Return (values bad-count worst)."
+  (let ((bad 0) (worst 0))
+    (dotimes (r h)
+      (dotimes (c w)
+        (let* ((ovx (/ (+ c 0.5) w))
+               (ovy (/ (+ r 0.5) h))
+               (u   (+ cx (/ (- ovx 0.5) zoom)))
+               (v   (+ cy (/ (- ovy 0.5) zoom)))
+               (oi  (* 4 (+ (* r w) c))))
+          (multiple-value-bind (er eg eb) (sample-nearest src w h u v)
+            (let ((d (max (abs (- er (aref out oi)))
+                          (abs (- eg (aref out (+ oi 1))))
+                          (abs (- eb (aref out (+ oi 2)))))))
+              (setf worst (max worst d))
+              (when (> d tol) (incf bad)))))))
+    (values bad worst)))
+
+(defun zoom-crop-test (&key (width 256) (height 144)
+                            (zoom 2.0) (center-x 0.6) (center-y 0.35)
+                            (path "/tmp/gs-m3-zoom.png"))
+  "M3: render a keyframe-driven punch-in over a gradient and verify the full
+frame matches the predicted zoom/pan sampling of the source."
+  (let* ((src (make-gradient-pattern width height))
+         (frame (kf:make-keyframe :zoom zoom :center-x center-x :center-y center-y))
+         (ec  (kf:effective-center frame))
+         (cx  (car ec)) (cy (cdr ec)))
+    (egl:with-headless-gl (ctx width height)
+      (declare (ignore ctx))
+      (make-fbo width height)
+      (let ((program (make-program +vs-passthrough+ +fs-zoom+))
+            (vao     (make-fullscreen-quad))
+            (tex     (make-texture-rgba src width height)))
+        (gl:clear-color 0.0 0.0 0.0 1.0)
+        (gl:clear :color-buffer-bit)
+        (draw-zoom program vao tex (kf:keyframe-zoom frame) cx cy)
+        (gl:finish)
+        (let ((out (read-rgba width height)))
+          (save-rgba-png out width height path)
+          (multiple-value-bind (bad worst) (verify-zoom src out width height zoom cx cy)
+            (format t "  [m3] zoom=~,2F center=(~,3F,~,3F) bad=~D/~D worst-delta=~D -> ~A~%"
+                    zoom cx cy bad (* width height) worst path)
+            (when (> bad (floor (* width height) 200))   ; allow <0.5% boundary pixels
+              (error "zoom transform mismatch: ~D pixels exceed tolerance (worst ~D)"
+                     bad worst))
+            (format t "  [m3] zoom/pan transform verified~%")
+            path))))))
 
 (defun texture-1to1-test (&key (width 256) (height 144) (path "/tmp/gs-m2-1to1.png"))
   "M2: upload a test pattern, draw it 1:1 through the shader pipeline, read back,

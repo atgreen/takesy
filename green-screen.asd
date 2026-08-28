@@ -21,9 +21,15 @@
   :components ((:module "src"
                 :components ((:file "dbus-fd-passing")))))
 
+(asdf:defsystem "green-screen/keyframe"
+  :description "Director keyframe timeline -- the compositor/director contract."
+  :serial t
+  :components ((:module "src"
+                :components ((:file "keyframe")))))
+
 (asdf:defsystem "green-screen/compositor"
   :description "Headless GL compositor: zoom/pan, background, rounded corners, shadow."
-  :depends-on ("cffi" "cl-opengl")
+  :depends-on ("cffi" "cl-opengl" "green-screen/keyframe")
   :serial t
   :components ((:module "src"
                 :components ((:file "egl")
