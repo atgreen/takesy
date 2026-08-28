@@ -1,7 +1,13 @@
-
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
-.beads/proxieddb/
-*.gate.lock*
+# ocicl downloads dependency sources here; ocicl.csv is the committed lockfile.
+/ocicl/
+# Compiled FASLs
+*.fasl
+*.fasl-tmp
+# Spike output
+/scratch/
+*.png
+# Editor
+*~
+.#*
+# Beads runtime lock (dolt-backed data is shared via bd sync, not git)
+.beads.gate.lock
