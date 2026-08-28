@@ -1,127 +1,74 @@
-# Agent Instructions
+# AGENTS.md — working notes for green-screen
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+Guidance for any agent (or human) hacking on this Wayland-native screen recorder.
+Read the **Hazards** section before running anything that opens a screencast.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [sync-concepts](https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+## Project shape
 
-## Quick Reference
+- Pure Common Lisp (SBCL + ocicl). Systems in `green-screen.asd`.
+- Capture path is proven end-to-end: xdg-desktop-portal ScreenCast over the CL
+  `dbus` client → SCM_RIGHTS fd → `libpipewire` (pure CFFI) → frame → PNG.
+- Work is tracked in **beads** (`bd ready`). Regenerate PipeWire ABI constants
+  with `sh src/gen-abi.sh` (needs `pipewire-devel`).
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+## ⚠️ Hazards — learn from these, do not repeat
 
-## Non-Interactive Shell Commands
+### 1. `cursor_mode=METADATA` hides the hardware cursor and can wedge Mutter
 
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
+**What happened (2026-08-28):** the spike requested `cursor_mode=METADATA` in
+`SelectSources` and did **not** cleanly close the portal session — it relied on
+the D-Bus connection dropping at process exit. `METADATA` mode tells the
+compositor to stop drawing the hardware cursor (it hands the cursor to the
+client as metadata instead). After several capture runs, GNOME/Mutter was left
+in a bad state: the on-screen **cursor disappeared and the laptop trackpad
+stopped responding**. Only a logout/reboot reliably restored input. This
+disrupted the user's machine mid-session.
 
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
+**Rules:**
+- **Default to `cursor_mode=EMBEDDED` (2).** The hardware cursor is never hidden
+  and the cursor is composited into the frames. Only request `METADATA` (4) once
+  we actually composite the cursor ourselves (the Director), and even then treat
+  it as a mode that MUST be paired with clean teardown.
+- **Always close the session and tear down PipeWire before exiting**, in an
+  `unwind-protect`:
+  - call `org.freedesktop.portal.Session.Close` on the `session_handle`;
+  - `pw_stream_disconnect` / `pw_stream_destroy`, `pw_context_destroy`,
+    `pw_main_loop_destroy`, `pw_deinit`.
+  Do not rely on the D-Bus connection dropping to clean up.
+- If a run is killed (timeout/SIGTERM) mid-session, assume the compositor may be
+  left in a bad cursor/input state.
 
-**Use these forms instead:**
-```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
+### 2. Interactive capture runs are disruptive — minimize them
 
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
-```
+Each run pops a GNOME "Share your screen" dialog and requires the user to pick a
+source. It also, per hazard #1, can perturb the live desktop. Therefore:
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+- **Validate everything possible offline first.** SPA PODs are validated against
+  real `spa_debug_pod` via `src/val-pod.c` — always do this before a live run.
+  Parse/format logic can be tested on captured `.bin` dumps.
+- **Batch what you need into a single run** rather than many trial runs.
+- **Warn the user before each interactive run** and tell them exactly what to do
+  (pick a source; the cursor may briefly hide).
+- If you must kill a run, remember it may need a Session.Close it never got.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:1105d646 -->
-## Beads Issue Tracker
+### 3. Recovering a wedged cursor / trackpad (no code, user-run)
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
+- Toggle cursor: `gsettings set org.gnome.desktop.interface cursor-size 48`
+  then back to its prior value.
+- Toggle touchpad: `gsettings set org.gnome.desktop.peripherals.touchpad
+  send-events disabled` then `enabled`.
+- Reload the I²C-HID touchpad driver (root):
+  `sudo modprobe -r i2c_hid_acpi && sudo modprobe i2c_hid_acpi`.
+- **Reliable fix:** log out and back in, or reboot. Fully resets Mutter+libinput.
+- The TrackPoint (red nub) usually still works even when the trackpad is dead —
+  the user can navigate with it to log out.
 
-### Quick Reference
+## Testing notes
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
-
-## Agent Context Profiles
-
-The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
-
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
-- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
-- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
-
-## Session Completion
-
-This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
-
-1. **File issues for remaining work** - Create beads for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Handle git/sync by active profile**:
-   ```bash
-   # Conservative/minimal/default: report status and proposed commands; wait for approval.
-   git status
-
-   # Team-maintainer opt-in only, unless current instructions forbid it:
-   git pull --rebase
-   git push
-   git status
-   ```
-5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
-
-**Critical rules:**
-- Explicit user or orchestrator instructions override this Beads block.
-- Do not commit or push without clear authority from the active profile or the current user request.
-- If a required sync or push is blocked, stop and report the exact command and error.
-<!-- END BEADS INTEGRATION -->
-
-<!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
-## Beads Issue Tracker
-
-Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
-
-### Quick Reference
-
-```bash
-bd ready                # Find available work
-bd show <id>            # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>           # Complete work
-bd prime                # Refresh Beads context
-```
-
-### Rules
-
-- Use `bd` for all task tracking; do not create markdown TODO lists.
-- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
-- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
-<!-- END BEADS CODEX SETUP -->
+- `--script` does NOT load `~/.sbclrc`; `spike/run.lisp` bootstraps ocicl itself.
+- Force a clean rebuild when in doubt:
+  `rm -rf ~/.cache/common-lisp/*/home/green/git/green-screen`.
+- Frame geometry: read stride/size from the buffer **chunk** (ground truth), not
+  only the Format POD. The compositor wraps fixated Format values in
+  `Choice(None)`, so scalars sit 16 bytes past the value-POD body — see
+  `parse-format` / `scalar-offset` in `src/pipewire.lisp`.
