@@ -42,13 +42,6 @@
                 :components ((:file "egl")
                              (:file "compositor")))))
 
-(asdf:defsystem "takesy/demo"
-  :description "End-to-end demo: Director auto-zoom timeline -> compositor mp4."
-  :depends-on ("takesy/director" "takesy/compositor")
-  :serial t
-  :components ((:module "src"
-                :components ((:file "demo")))))
-
 (asdf:defsystem "takesy/portal"
   :description "xdg-desktop-portal ScreenCast handshake -> PipeWire fd + node id."
   :depends-on ("dbus" "takesy/dbus-fd")
@@ -72,7 +65,7 @@
 
 (asdf:defsystem "takesy/cli"
   :description "takesy command-line entry point (build the executable with build.lisp)."
-  :depends-on ("takesy/demo" "takesy/record")
+  :depends-on ("takesy/record")
   :serial t
   :components ((:module "src"
                 :components ((:file "cli")))))

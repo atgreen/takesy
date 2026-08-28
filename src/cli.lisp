@@ -1,14 +1,12 @@
 ;;;; cli.lisp
 ;;;;
-;;;; Bead green-screen-am4.5: the `takesy` command-line entry point. For now it
-;;;; exposes `takesy demo`, which renders the synthetic auto-zoom pipeline
-;;;; (Director -> compositor) to an mp4 -- a runnable binary that de-risks the
-;;;; save-lisp-and-die packaging before real capture (`takesy record`) lands.
+;;;; The `takesy` command-line entry point. Recording is the default action:
+;;;; `takesy [options]` captures the screen, auto-zooms, and writes an mp4
+;;;; (via takesy/record); `help` prints usage.
 
 (defpackage #:takesy/cli
   (:use #:cl)
-  (:local-nicknames (#:dir #:takesy/director) (#:demo #:takesy/demo)
-                    (#:rec #:takesy/record))
+  (:local-nicknames (#:rec #:takesy/record))
   (:export #:main #:run))
 
 (in-package #:takesy/cli)
@@ -51,7 +49,6 @@ Signal a usage error on a malformed option."
 
 Usage:
   takesy [options]           Capture your screen -> auto-zoom -> mp4.
-  takesy demo [options]      Render the synthetic auto-zoom demo to an mp4.
   takesy help                Show this help.
 
 options:
@@ -61,28 +58,7 @@ options:
   --scale  K       downsample output 1/K (default 3)
   Pops a screen-share dialog; click GNOME's Stop button (top bar) to finish. The
   cursor hides during capture (auto-zoom needs its position), restored on exit.
-
-demo options:
-  --output PATH    output mp4            (default /tmp/takesy-director.mp4)
-  --width  W       render width, even    (default 480)
-  --height H       render height, even   (default 300)
-  --fps    N       frames per second     (default 30)
-  --zoom   Z       punch-in zoom factor  (default 2.0)
 ")
-
-(defun cmd-demo (args)
-  (let* ((o    (parse-kv args))
-         (out  (opt o "output" "/tmp/takesy-director.mp4"))
-         (w    (opt-int o "width" 480))
-         (h    (opt-int o "height" 300))
-         (fps  (opt-int o "fps" 30))
-         (zoom (opt-num o "zoom" 2.0)))
-    (format t "takesy demo: ~Dx~D @ ~Dfps, zoom ~,1F -> ~A~%" w h fps zoom out)
-    (let ((dir:*zoom-level* zoom))
-      (multiple-value-bind (path n)
-          (demo:director-demo :width w :height h :fps fps :path out)
-        (format t "done: wrote ~A (~D frames)~%" path n)
-        path))))
 
 (defun cmd-record (args)
   (let* ((o     (parse-kv args))
@@ -101,13 +77,12 @@ demo options:
 
 (defun run (args)
   "Dispatch ARGS (the command-line minus argv0). Recording is the default action,
-so `takesy [options]` records; `demo` and `help` are the only named subcommands.
-Return normally on success; signal on failure. Separate from MAIN so it is
-REPL-callable."
+so `takesy [options]` records; `help` is the only named subcommand (`record` is
+still accepted). Return normally on success; signal on failure. Separate from
+MAIN so it is REPL-callable."
   (let ((cmd (first args)))
     (cond
       ((member cmd '("help" "--help" "-h") :test #'equal) (write-string +usage+) nil)
-      ((equal cmd "demo") (cmd-demo (rest args)))
       ((equal cmd "record") (cmd-record (rest args)))  ; still accepted, but optional
       (t (cmd-record args)))))                          ; default: just record
 
