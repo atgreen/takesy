@@ -27,7 +27,9 @@
            #:activity-segment-t-start #:activity-segment-t-end
            #:activity-segment-focus-x #:activity-segment-focus-y
            #:activity-segment-n-clicks #:activity-segment-n-keys
-           #:*activity-gap* #:detect-activity))
+           #:*activity-gap* #:detect-activity
+           #:*zoom-level* #:*zoom-lead* #:*zoom-tail*
+           #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
 
@@ -173,6 +175,67 @@ the gap to the previous event exceeds GAP. Return them in time order."
           (setf last-t (input-event-time ev)))
         (flush))
       (nreverse segments))))
+
+;;; ------------------------------------------------------------------
+;;; Zoom scheduling. Each activity segment becomes a punch-in: ease from wide to
+;;; a zoom centred on the segment focus shortly BEFORE it starts (LEAD), hold
+;;; through it, then ease back to wide after an idle TAIL. Frame styling
+;;; (padding/corner/shadow/bg) is held constant -- only zoom + pan animate, the
+;;; polished convention. Output is a takesy/keyframe timeline, sorted and
+;;; bracketed by wide frames at t=0 and the session end.
+
+(defparameter *zoom-level* 2.0 "Punch-in zoom factor for activity. REPL-tunable.")
+(defparameter *zoom-lead*  0.5 "Seconds to begin zooming in before a segment.")
+(defparameter *zoom-tail*  0.6 "Seconds to stay zoomed after a segment before easing out.")
+
+(defun %clean-timeline (kfs)
+  "Sort keyframes by time; where two collide in time (e.g. a clamped lead-in
+meets the opening frame), keep the more-zoomed one so activity wins."
+  (let ((sorted (stable-sort (copy-list kfs) #'< :key #'kf:keyframe-time))
+        (out '()))
+    (dolist (k sorted (nreverse out))
+      (if (and out (< (abs (- (kf:keyframe-time k) (kf:keyframe-time (car out)))) 1e-4))
+          (when (> (kf:keyframe-zoom k) (kf:keyframe-zoom (car out)))
+            (setf (car out) k))
+          (push k out)))))
+
+(defun schedule-zooms (session segments
+                       &key (zoom *zoom-level*) (lead *zoom-lead*) (tail *zoom-tail*)
+                            (padding 0.06) (corner 0.10)
+                            (shadow-blur 0.05) (shadow-alpha 0.5)
+                            (bg '(0.11 0.12 0.15)))
+  "Turn activity SEGMENTS into a keyframe timeline over SESSION's duration."
+  (let* ((w (session-width session)) (h (session-height session))
+         (dur (session-duration session))
+         (kfs '()))
+    (flet ((frame (time zoom cx cy)
+             (kf:make-keyframe :time (max 0.0 (min dur time))
+                               :zoom zoom :center-x cx :center-y cy
+                               :padding padding :corner-radius corner
+                               :shadow-blur shadow-blur :shadow-alpha shadow-alpha
+                               :bg-color bg)))
+      (push (frame 0.0 1.0 0.5 0.5) kfs)                 ; open wide
+      (dolist (seg segments)
+        (multiple-value-bind (fx fy)
+            (px->uv (activity-segment-focus-x seg) (activity-segment-focus-y seg) w h)
+          (push (frame (- (activity-segment-t-start seg) lead) 1.0 0.5 0.5) kfs)
+          (push (frame (activity-segment-t-start seg) zoom fx fy) kfs)  ; zoomed in
+          (push (frame (activity-segment-t-end seg)   zoom fx fy) kfs)  ; hold
+          (push (frame (+ (activity-segment-t-end seg) tail) 1.0 0.5 0.5) kfs))) ; ease out
+      (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
+      (%clean-timeline (nreverse kfs)))))
+
+(defun plan-timeline (session &key (gap *activity-gap*) (zoom *zoom-level*)
+                                   (lead *zoom-lead*) (tail *zoom-tail*)
+                                   (padding 0.06) (corner 0.10)
+                                   (shadow-blur 0.05) (shadow-alpha 0.5)
+                                   (bg '(0.11 0.12 0.15)))
+  "Full Director pass: SESSION -> activity segments -> zoom keyframe timeline
+directly renderable by the compositor's render-timeline."
+  (schedule-zooms session (detect-activity session :gap gap)
+                  :zoom zoom :lead lead :tail tail
+                  :padding padding :corner corner
+                  :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg))
 
 ;;; ------------------------------------------------------------------
 ;;; Synthetic fixtures. A deterministic session (no RNG, so tests are stable):
