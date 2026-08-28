@@ -20,7 +20,7 @@
            #:input-event-time #:input-event-kind #:input-event-x #:input-event-y
            #:session #:make-session #:session-p
            #:session-width #:session-height #:session-cursor #:session-events
-           #:session-duration
+           #:session-damage #:session-duration #:*zoom-fit-margin*
            #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
            #:*cursor-omega-slow* #:*cursor-omega-fast* #:*cursor-speed-ref*
            #:*cursor-anticipate* #:spring-step #:ease-cursor
@@ -31,7 +31,7 @@
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
-           #:merge-segments #:schedule-zooms #:plan-timeline))
+           #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
 
@@ -50,7 +50,8 @@
 (defstruct session
   (width 1920) (height 1200)
   (cursor '())   ; list of cursor-sample, ascending time
-  (events '()))  ; list of input-event, ascending time
+  (events '())   ; list of input-event, ascending time
+  (damage '()))  ; list of (time x0 y0 x1 y1), changed-region UV bbox per frame
 
 (defun session-duration (s)
   "Wall-clock span of the session's cursor track, in seconds."
@@ -269,6 +270,52 @@ Each qualifying dwell yields a segment focused on the mean dwell position."
 (defparameter *zoom-merge-gap* 2.5
   "Idle gap (s) below which adjacent activity stays zoomed and PANS between spots
 instead of zooming out and back in -- avoids constant in/out. REPL-tunable.")
+(defparameter *zoom-fit-margin* 0.18
+  "Fractional margin kept around the activity bounding box when fitting zoom, so
+screen changes near the edge of the active region aren't cropped. REPL-tunable.")
+(defparameter *damage-include-radius* 0.33
+  "Only screen changes whose centre is within this UV distance of where the cursor
+is working count toward the zoom fit; distant incidental updates are ignored, so
+one wide change elsewhere doesn't defeat the zoom entirely. REPL-tunable.")
+(defparameter *damage-max-rect* 0.6
+  "Screen changes wider or taller than this fraction of the frame are treated as
+scrolling / global updates (not a localized thing to frame) and excluded from the
+zoom-region estimate. REPL-tunable.")
+
+(defun %activity-bbox (session t0 t1 &key (near *damage-include-radius*)
+                                          (max-rect *damage-max-rect*))
+  "UV bounding box of the working region in [T0,T1]: the cursor path, grown to
+include the localized screen changes (damage) NEAR it -- skipping changes larger
+than MAX-RECT (scroll/global). Return (values x0 y0 x1 y1) in 0..1, or NIL."
+  (let ((w (session-width session)) (h (session-height session))
+        (x0 nil) (y0 nil) (x1 nil) (y1 nil)
+        (cxsum 0.0) (cysum 0.0) (cn 0))
+    (flet ((acc (ux uy)
+             (setf x0 (if x0 (min x0 ux) ux) y0 (if y0 (min y0 uy) uy)
+                   x1 (if x1 (max x1 ux) ux) y1 (if y1 (max y1 uy) uy))))
+      ;; cursor path first -- it anchors *where* the user is working
+      (dolist (cs (session-cursor session))
+        (when (<= t0 (cursor-sample-time cs) t1)
+          (let ((ux (/ (cursor-sample-x cs) w)) (uy (/ (cursor-sample-y cs) h)))
+            (acc ux uy) (incf cxsum ux) (incf cysum uy) (incf cn))))
+      (let ((ccx (if (plusp cn) (/ cxsum cn) 0.5))
+            (ccy (if (plusp cn) (/ cysum cn) 0.5)))
+        (dolist (d (session-damage session))
+          (destructuring-bind (dt dx0 dy0 dx1 dy1) d
+            (when (and (<= t0 dt t1)
+                       (<= (- dx1 dx0) max-rect) (<= (- dy1 dy0) max-rect))  ; skip scroll/global
+              (let ((rcx (* 0.5 (+ dx0 dx1))) (rcy (* 0.5 (+ dy0 dy1))))
+                (when (or (zerop cn)
+                          (<= (sqrt (+ (expt (- rcx ccx) 2) (expt (- rcy ccy) 2))) near))
+                  (acc dx0 dy0) (acc dx1 dy1))))))))
+    (when x0 (values (max 0.0 x0) (max 0.0 y0) (min 1.0 x1) (min 1.0 y1)))))
+
+(defun %fit-zoom (bw bh max-zoom margin)
+  "Largest zoom (<= MAX-ZOOM, >= 1) whose 1/zoom window still contains a BW x BH
+UV box with MARGIN to spare."
+  (let ((span (* (max bw bh) (+ 1.0 margin))))
+    (if (<= span 0.0) max-zoom
+        (max 1.0 (min max-zoom (/ 1.0 span))))))
 
 (defun merge-segments (segments gap)
   "Group time-ordered SEGMENTS so any two separated by <= GAP seconds share a
@@ -303,8 +350,7 @@ meets the opening frame), keep the more-zoomed one so activity wins."
   "Turn activity SEGMENTS into a keyframe timeline over SESSION's duration.
 Segments closer than *zoom-merge-gap* are merged into one sustained zoom that
 pans between them, so brief pauses don't cause the view to zoom out and back in."
-  (let* ((w (session-width session)) (h (session-height session))
-         (dur (session-duration session))
+  (let* ((dur (session-duration session))
          (groups (merge-segments segments *zoom-merge-gap*))
          (kfs '()))
     (flet ((frame (time zoom cx cy)
@@ -317,13 +363,18 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
       (dolist (g groups)
         (let ((g-start (activity-segment-t-start (first g)))
               (g-end   (activity-segment-t-end (car (last g)))))
-          (push (frame (- g-start lead) 1.0 0.5 0.5) kfs)   ; ease in once per group
-          (dolist (seg g)                                   ; pan across the group's spots
-            (multiple-value-bind (fx fy)
-                (px->uv (activity-segment-focus-x seg) (activity-segment-focus-y seg) w h)
-              (push (frame (activity-segment-t-start seg) zoom fx fy) kfs)
-              (push (frame (activity-segment-t-end seg)   zoom fx fy) kfs)))
-          (push (frame (+ g-end tail) 1.0 0.5 0.5) kfs)))   ; ease out once per group
+          ;; Fit the zoom to ALL activity (cursor + screen changes) across the
+          ;; whole group, so nothing that moves in that window gets cropped.
+          (multiple-value-bind (x0 y0 x1 y1) (%activity-bbox session g-start g-end)
+            (let* ((cx (if x0 (* 0.5 (+ x0 x1)) 0.5))
+                   (cy (if y0 (* 0.5 (+ y0 y1)) 0.5))
+                   (z  (if x0 (%fit-zoom (- x1 x0) (- y1 y0) zoom *zoom-fit-margin*)
+                           zoom)))
+              (when (> z 1.02)              ; skip groups too spread out to zoom
+                (push (frame (- g-start lead) 1.0 0.5 0.5) kfs)  ; ease in
+                (push (frame g-start z cx cy) kfs)               ; hold, fit
+                (push (frame g-end   z cx cy) kfs)
+                (push (frame (+ g-end tail) 1.0 0.5 0.5) kfs)))))) ; ease out
       (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
       (%clean-timeline (nreverse kfs)))))
 

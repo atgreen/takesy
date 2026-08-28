@@ -9,7 +9,7 @@
   (:use #:cl)
   (:local-nicknames (#:portal #:takesy/portal) (#:pw #:takesy/pipewire)
                     (#:dir #:takesy/director) (#:comp #:takesy/compositor))
-  (:export #:recording->session #:compose-recording #:record-to-mp4))
+  (:export #:recording->session #:compute-damage #:compose-recording #:record-to-mp4))
 
 (in-package #:takesy/record)
 
@@ -18,6 +18,41 @@
     (let ((v (make-array (file-length s) :element-type '(unsigned-byte 8))))
       (read-sequence v s)
       v)))
+
+(defun %frame-luma-grid (bytes w h gw gh)
+  "Sample a GW x GH coarse luma grid (one pixel per cell) from a BGRx frame."
+  (let ((g (make-array (* gw gh) :element-type 'fixnum)))
+    (dotimes (cy gh g)
+      (dotimes (cx gw)
+        (let* ((px (min (1- w) (floor (* (+ cx 0.5) w) gw)))
+               (py (min (1- h) (floor (* (+ cy 0.5) h) gh)))
+               (i  (* 4 (+ (* py w) px))))
+          (setf (aref g (+ (* cy gw) cx))     ; BGRx: B + 2G + R
+                (+ (aref bytes i) (* 2 (aref bytes (+ i 1))) (aref bytes (+ i 2)))))))))
+
+(defun compute-damage (rec &key (gw 64) (gh 40) (threshold 48))
+  "Diff consecutive captured frames on a coarse GW x GH grid; return a damage
+track: (time x0 y0 x1 y1) UV bbox of changed cells, per frame that changed. This
+is what lets the Director size the zoom to real screen activity, not just the
+cursor."
+  (let* ((frames (getf rec :frames)) (w (getf rec :width)) (h (getf rec :height))
+         (prev nil) (out '()))
+    (dolist (f frames (nreverse out))
+      (let ((cur (%frame-luma-grid (%read-file-bytes (getf f :path)) w h gw gh)))
+        (when prev
+          (let (minx miny maxx maxy)
+            (dotimes (cy gh)
+              (dotimes (cx gw)
+                (let ((k (+ (* cy gw) cx)))
+                  (when (> (abs (- (aref cur k) (aref prev k))) threshold)
+                    (setf minx (if minx (min minx cx) cx) maxx (if maxx (max maxx cx) cx)
+                          miny (if miny (min miny cy) cy) maxy (if maxy (max maxy cy) cy))))))
+            (when minx
+              (push (list (float (getf f :time) 1.0)
+                          (/ minx (float gw 1.0)) (/ miny (float gh 1.0))
+                          (/ (1+ maxx) (float gw 1.0)) (/ (1+ maxy) (float gh 1.0)))
+                    out))))
+        (setf prev cur)))))
 
 (defun recording->session (rec)
   "Build a Director SESSION from a capture recording plist: the cursor track is
@@ -97,14 +132,17 @@ length is the ACTUAL captured span, not the cap. Return (values out n-frames)."
     (let* ((rec      (pw:record-frames fd node :duration duration
                                        :max-fps (max fps 30) :dir dir))
            (session  (recording->session rec))
-           (timeline (dir:plan-timeline session))    ; :auto -> dwell (no events)
+           (damage   (compute-damage rec))           ; where the screen changed
+           (timeline (progn (setf (dir:session-damage session) damage)
+                            (dir:plan-timeline session)))  ; fit zoom to activity
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (getf rec :width) :height (getf rec :height)
                                        :cursor (dir:ease-cursor session))))
-      (format t "  [record] captured ~D frames, ~D cursor samples -> ~D keyframes~%"
+      (format t "  [record] captured ~D frames (~D cursor, ~D changed) -> ~D keyframes~%"
               (length (getf rec :frames))
               (length (dir:session-cursor session))
+              (length damage)
               (length timeline))
       ;; No :duration -> compose uses the actual captured span (you decide the
       ;; length by when you click Stop).
