@@ -56,6 +56,13 @@
   :components ((:module "src"
                 :components ((:file "portal")))))
 
+(asdf:defsystem "takesy/evdev"
+  :description "Read Linux evdev clicks/keys into Director input-events."
+  :depends-on ("takesy/director")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "evdev")))))
+
 (asdf:defsystem "takesy/record"
   :description "Record orchestration: portal capture -> Director -> compositor -> mp4."
   :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor")
