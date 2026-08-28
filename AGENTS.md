@@ -8,6 +8,13 @@ Read the **Hazards** section before running anything that opens a screencast.
 - Pure Common Lisp (SBCL + ocicl). Systems in `green-screen.asd`.
 - Capture path is proven end-to-end: xdg-desktop-portal ScreenCast over the CL
   `dbus` client → SCM_RIGHTS fd → `libpipewire` (pure CFFI) → frame → PNG.
+- Compositor MVP is proven end-to-end (bead `green-screen-7k8`): headless GL
+  (`green-screen/compositor`) renders an eased keyframe timeline
+  (`green-screen/keyframe`, the Director↔Compositor contract) → zoom/pan, padded
+  background, rounded corners, drop shadow → H.264 mp4. Stack is **hybrid**:
+  reuse `cl-opengl` for GL calls, hand-roll CFFI only for the EGL bootstrap
+  (`src/egl.lisp`) that `cl-opengl` omits. Still on a stub timeline + still
+  source; real capture-frame/Director wiring is `green-screen-7k8.7`.
 - Work is tracked in **beads** (`bd ready`). Regenerate PipeWire ABI constants
   with `sh src/gen-abi.sh` (needs `pipewire-devel`).
 
@@ -72,3 +79,28 @@ source. It also, per hazard #1, can perturb the live desktop. Therefore:
   only the Format POD. The compositor wraps fixated Format values in
   `Choice(None)`, so scalars sit 16 bytes past the value-POD body — see
   `parse-format` / `scalar-offset` in `src/pipewire.lisp`.
+
+### Compositor (GL) notes
+
+- **Headless GL is offline/CI-friendly** — no share dialog, unlike capture. Each
+  milestone has a self-checking entry point in `src/compositor.lisp`
+  (`bringup-test`, `texture-1to1-test`, `zoom-crop-test`, `compose-test`,
+  `compose-reduction-check`, `compose-shadow-test`, `render-demo`); load
+  `green-screen/compositor` and call one.
+- **Headless context** comes up via `EGL_PLATFORM_SURFACELESS_MESA` +
+  `EGL_DEFAULT_DISPLAY` (routes through glvnd to `libEGL_mesa`, Intel path). The
+  `libEGL warning: pci id ... driver (null)` lines are **benign** — glvnd probes
+  NVIDIA first, fails, falls back to Mesa. GBM-on-`/dev/dri/renderD128` is the
+  fallback if surfaceless is ever unavailable.
+- **`cl-opengl` status quirk:** `gl:get-shader`/`get-program` may return the
+  status as `T`, `1`, `NIL`, `0`, or `:false`; normalise before testing (see
+  `shader-ok-p`). Also `gl:check-framebuffer-status` returns
+  `:framebuffer-complete-oes`, not `:framebuffer-complete`.
+- **ffmpeg encoder varies:** Fedora's default ffmpeg has **no `libx264`** (ships
+  `libopenh264`). Don't hardcode an encoder — `pick-h264-encoder` probes
+  `ffmpeg -encoders` and falls back. `yuv420p` needs even width/height.
+- **Orientation:** readback is bottom-origin and we save/encode **without** a
+  vflip. Uploading source rows as a texture inverts (data row 0 → GL `v=0`) and
+  `glReadPixels` inverts again — the two cancel, so RGBA rows arrive top-first
+  and output is upright. In the shader, **image-down = increasing `P.y`** (the
+  drop shadow offsets `+P.y`).
