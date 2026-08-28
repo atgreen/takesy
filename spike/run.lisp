@@ -22,12 +22,24 @@
 (load (merge-pathnames "spike/portal-screencast.lisp" (uiop:getcwd)))
 
 ;; cursor_mode defaults to EMBEDDED (safe). Opt into METADATA -- which hides the
-;; hardware cursor and exercises the cursor-capture path -- with GS_CURSOR_MODE=4.
-;; Teardown (Session.Close) runs either way; see AGENTS.md hazard #1.
+;; hardware cursor and exercises the cursor path -- with GS_CURSOR_MODE=4.
+;; GS_RECORD=<seconds> records a clip (frame sequence + cursor track); it forces
+;; METADATA so we get the cursor track, and the Session.Close teardown is armed.
+;; Teardown runs either way; see AGENTS.md hazard #1.
 (handler-case
-    (let ((mode (let ((s (uiop:getenv "GS_CURSOR_MODE")))
-                  (if s (parse-integer s) takesy/spike::+cursor-embedded+))))
-      (takesy/spike:run :cursor-mode mode))
+    (let* ((rec-s (uiop:getenv "GS_RECORD"))
+           (mode  (let ((s (uiop:getenv "GS_CURSOR_MODE")))
+                    (cond (rec-s takesy/spike::+cursor-metadata+)
+                          (s (parse-integer s))
+                          (t takesy/spike::+cursor-embedded+)))))
+      (if rec-s
+          (takesy/spike:run
+           :cursor-mode mode
+           :record (list :duration (float (read-from-string rec-s) 1.0)
+                         :fps (let ((f (uiop:getenv "GS_FPS")))
+                                (if f (parse-integer f) 30))
+                         :dir (or (uiop:getenv "GS_REC_DIR") "/tmp/takesy-rec")))
+          (takesy/spike:run :cursor-mode mode)))
   (error (e)
     (format *error-output* "~&Spike error: ~A~%" e)
     (uiop:quit 1)))

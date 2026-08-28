@@ -33,6 +33,10 @@
   (frames-left 120)                     ; budget to wait for cursor metadata
   (metas-seen 0) (cursor-meta-seen nil) (last-cursor-id nil)
   (update-rc nil) (meta-types nil)
+  ;; recording mode (am4.1): capture many frames over a deadline instead of one.
+  (record-p nil) (record-dir nil)
+  (record-start 0) (record-deadline 0) (record-min-dt 0) (record-last nil)
+  (n-saved 0) (frames '())
   (done nil) (error nil) (n-empty 0))
 
 (defvar *cap* nil)
@@ -134,6 +138,46 @@ id /= 0 (valid cursor data)."
         (cffi:foreign-free curpod)
         (format t "  [pw] negotiated ~Dx~D fmt=~D~%" w h fmt)))))
 
+(defun %write-frame-raw (path dptr coff csize)
+  "memcpy CSIZE bytes at DPTR+COFF and write them to PATH (raw BGRx)."
+  (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
+    (cffi:with-pointer-to-vector-data (dst vec)
+      (cffi:foreign-funcall "memcpy" :pointer dst
+                            :pointer (ptr+ dptr coff) :size csize :pointer))
+    (with-open-file (s path :direction :output :element-type '(unsigned-byte 8)
+                            :if-exists :supersede)
+      (write-sequence vec s))))
+
+(defun %record-frame (cap stream b spabuf dptr csize cstride coff)
+  "Recording-mode buffer handler: save throttled frames + per-frame cursor until
+the deadline, then quit the loop. Always requeues the buffer."
+  (let ((now (get-internal-real-time)))
+    (cond
+      ((>= now (capture-record-deadline cap))
+       (setf (capture-done cap) t)
+       (pw-stream-queue-buffer stream b)
+       (pw-main-loop-quit (capture-loop cap)))
+      ((or (null (capture-record-last cap))
+           (>= (- now (capture-record-last cap)) (capture-record-min-dt cap)))
+       (when (> cstride 0)                 ; chunk geometry is ground truth
+         (setf (capture-stride cap) cstride
+               (capture-width cap)  (floor cstride 4)
+               (capture-height cap) (floor csize cstride)))
+       (multiple-value-bind (cx cy) (read-cursor spabuf)
+         (let* ((i    (capture-n-saved cap))
+                (path (format nil "~A/frame-~5,'0D.bgrx" (capture-record-dir cap) i)))
+           (%write-frame-raw path dptr coff csize)
+           (push (list :i i
+                       :time (/ (float (- now (capture-record-start cap)) 1.0d0)
+                                internal-time-units-per-second)
+                       :cursor-x cx :cursor-y cy :path path)
+                 (capture-frames cap))
+           (when cx (setf (capture-cursor-meta-seen cap) t))
+           (incf (capture-n-saved cap))
+           (setf (capture-record-last cap) now)))
+       (pw-stream-queue-buffer stream b))
+      (t (pw-stream-queue-buffer stream b)))))   ; throttled: skip this frame
+
 (cffi:defcallback cb-process :void ((data :pointer))
   (declare (ignore data))
   (let* ((cap *cap*)
@@ -148,6 +192,9 @@ id /= 0 (valid cursor data)."
              (cstride (i32@ chunk +off/spa-chunk/stride+))
              (coff    (u32@ chunk +off/spa-chunk/offset+)))
         (cond
+          ((and (capture-record-p cap)
+                (not (cffi:null-pointer-p dptr)) (> csize 0))
+           (%record-frame cap stream b spabuf dptr csize cstride coff))
           ((and (not (cffi:null-pointer-p dptr)) (> csize 0))
            (multiple-value-bind (cx cy present id) (read-cursor spabuf)
              (let ((nm (u32@ spabuf +off/spa-buffer/n-metas+))
@@ -206,9 +253,9 @@ id /= 0 (valid cursor data)."
 ;;; ------------------------------------------------------------------
 ;;; Driver.
 
-(defun capture-one-frame (fd node-id raw-path)
-  "Connect to NODE-ID over the portal FD, capture one frame to RAW-PATH.
-Return the CAPTURE struct (width/height/format/stride/cursor)."
+(defun %open-stream (fd node-id)
+  "pw_init + main loop + context + connect_fd(portal fd) + stream_new.
+Return (values mloop ctx stream)."
   (pw-init (cffi:null-pointer) (cffi:null-pointer))
   (let* ((mloop (pw-main-loop-new (cffi:null-pointer)))
          (l     (pw-main-loop-get-loop mloop))
@@ -219,34 +266,81 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
     (let* ((props  (make-properties "media.type" "Video"
                                     "media.category" "Capture"
                                     "media.role" "Screen"))
-           (stream (pw-stream-new core "takesy-capture" props))
-           (hook   (cffi:foreign-alloc :uint8 :count +sz/spa-hook+))
-           (events (make-stream-events))
-           (cap    (make-capture :loop mloop :stream stream :raw-path raw-path)))
-      (dotimes (i +sz/spa-hook+) (setf (cffi:mem-aref hook :uint8 i) 0))
-      ;; Everything from add-listener onward is torn down in the cleanup form,
-      ;; so a non-local exit (error in a callback, quit) never leaks the stream
-      ;; or leaves PipeWire initialized -- see AGENTS.md hazard #1.
-      (unwind-protect
-           (let ((*cap* cap))
-             (pw-stream-add-listener stream hook events (cffi:null-pointer))
-             (let* ((fmt-pod (octets->foreign (build-enum-format-pod)))
-                    (params  (cffi:foreign-alloc :pointer :count 1))
-                    (flags   (logior +pw-stream-flag-autoconnect+
-                                      +pw-stream-flag-map-buffers+)))
-               (setf (cffi:mem-aref params :pointer 0) fmt-pod)
-               (pw-stream-connect stream +spa-direction-input+ node-id flags params 1)
-               (cffi:foreign-free params)
-               (cffi:foreign-free fmt-pod))
-             (pw-main-loop-run mloop))
-        (ignore-errors (pw-stream-disconnect stream))
-        (pw-stream-destroy stream)
-        (pw-context-destroy ctx)
-        (pw-main-loop-destroy mloop)
-        (cffi:foreign-free hook)
-        (cffi:foreign-free events)
-        (pw-deinit))
+           (stream (pw-stream-new core "takesy-capture" props)))
+      (values mloop ctx stream))))
+
+(defun %run-and-teardown (mloop ctx stream node-id cap)
+  "Bind *cap*, add the events listener, connect STREAM to NODE-ID with our
+EnumFormat, run the loop, then tear everything down under unwind-protect so a
+callback error or quit never leaks the stream or leaves PipeWire initialized
+(AGENTS.md hazard #1)."
+  (let ((hook   (cffi:foreign-alloc :uint8 :count +sz/spa-hook+))
+        (events (make-stream-events)))
+    (dotimes (i +sz/spa-hook+) (setf (cffi:mem-aref hook :uint8 i) 0))
+    (unwind-protect
+         (let ((*cap* cap))
+           (pw-stream-add-listener stream hook events (cffi:null-pointer))
+           (let* ((fmt-pod (octets->foreign (build-enum-format-pod)))
+                  (params  (cffi:foreign-alloc :pointer :count 1))
+                  (flags   (logior +pw-stream-flag-autoconnect+
+                                    +pw-stream-flag-map-buffers+)))
+             (setf (cffi:mem-aref params :pointer 0) fmt-pod)
+             (pw-stream-connect stream +spa-direction-input+ node-id flags params 1)
+             (cffi:foreign-free params)
+             (cffi:foreign-free fmt-pod))
+           (pw-main-loop-run mloop))
+      (ignore-errors (pw-stream-disconnect stream))
+      (pw-stream-destroy stream)
+      (pw-context-destroy ctx)
+      (pw-main-loop-destroy mloop)
+      (cffi:foreign-free hook)
+      (cffi:foreign-free events)
+      (pw-deinit))))
+
+(defun capture-one-frame (fd node-id raw-path)
+  "Connect to NODE-ID over the portal FD, capture one frame to RAW-PATH.
+Return the CAPTURE struct (width/height/format/stride/cursor)."
+  (multiple-value-bind (mloop ctx stream) (%open-stream fd node-id)
+    (let ((cap (make-capture :loop mloop :stream stream :raw-path raw-path)))
+      (%run-and-teardown mloop ctx stream node-id cap)
       cap)))
+
+(defun record-frames (fd node-id &key (duration 3.0) (max-fps 30)
+                                      (dir "/tmp/takesy-rec"))
+  "Record DURATION seconds from NODE-ID into DIR: one BGRx file per kept frame
+(throttled to MAX-FPS) plus a per-frame cursor track. Return a plist:
+  (:width :height :stride :format :fps :dir :frames), where :frames is a list of
+  (:i :time :cursor-x :cursor-y :path) in capture order."
+  (ensure-directories-exist (concatenate 'string (string-right-trim "/" dir) "/"))
+  (multiple-value-bind (mloop ctx stream) (%open-stream fd node-id)
+    (let* ((now (get-internal-real-time))
+           (cap (make-capture :loop mloop :stream stream
+                              :record-p t
+                              :record-dir (string-right-trim "/" dir)
+                              :record-start now
+                              :record-deadline
+                              (+ now (round (* duration internal-time-units-per-second)))
+                              :record-min-dt
+                              (round (/ internal-time-units-per-second (max 1 max-fps))))))
+      (%run-and-teardown mloop ctx stream node-id cap)
+      (let ((recording
+              (list :width (capture-width cap) :height (capture-height cap)
+                    :stride (capture-stride cap) :format (capture-format cap)
+                    :fps max-fps :dir (capture-record-dir cap)
+                    :cursor-meta (capture-cursor-meta-seen cap)
+                    :frames (nreverse (capture-frames cap)))))
+        ;; Persist a manifest so the recording dir is self-contained and can be
+        ;; reloaded later (load-recording) by the orchestrator / CLI.
+        (with-open-file (s (format nil "~A/manifest.sexp" (capture-record-dir cap))
+                           :direction :output :if-exists :supersede
+                           :if-does-not-exist :create)
+          (with-standard-io-syntax (prin1 recording s)))
+        recording))))
+
+(defun load-recording (dir)
+  "Read the manifest written by RECORD-FRAMES back into a recording plist."
+  (with-open-file (s (format nil "~A/manifest.sexp" (string-right-trim "/" dir)))
+    (with-standard-io-syntax (read s))))
 
 (defun format->ffmpeg-pixfmt (fmt)
   (cond ((= fmt +spa-video-format-bgrx+) "bgr0")

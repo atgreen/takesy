@@ -147,13 +147,14 @@ On decode a variant unpacks to its bare value, so an entry is (key value)."
 ;;; ------------------------------------------------------------------
 ;;; The handshake.
 
-(defun run (&key (cursor-mode +cursor-embedded+))
-  "Drive the portal ScreenCast handshake and capture one frame to PNG.
+(defun run (&key (cursor-mode +cursor-embedded+) record)
+  "Drive the portal ScreenCast handshake, then either capture one frame to PNG
+or -- when RECORD is a plist (:duration S :fps N :dir PATH) -- record a clip.
 
 CURSOR-MODE defaults to +CURSOR-EMBEDDED+ (safe: the compositor keeps drawing
-the hardware cursor). Pass +CURSOR-METADATA+ only for the guarded cursor test --
-it hides the HW cursor and depends on the Session.Close teardown below to restore
-Mutter's cursor/input state (AGENTS.md hazard #1)."
+the hardware cursor). Pass +CURSOR-METADATA+ only for the guarded cursor test or
+recording (we need the cursor track) -- it hides the HW cursor and depends on the
+Session.Close teardown below to restore Mutter's cursor/input state (hazard #1)."
   (d:with-open-bus (bus (d:session-server-addresses))
     (format t "~&Connected to session bus as ~A~%" (d:bus-name bus))
     (when (= cursor-mode +cursor-metadata+)
@@ -225,20 +226,41 @@ Mutter's cursor/input state (AGENTS.md hazard #1)."
                  (unless (and (integerp fd) (>= fd 0))
                    (error "OpenPipeWireRemote did not deliver a usable fd."))
 
-                 ;; 5. Native PipeWire capture: one frame + cursor (bead jme).
-                 (format t "~&[5/5] Capturing one frame via pure-Lisp libpipewire...~%")
-                 (let ((info (takesy/pipewire:capture-frame-to-png
-                              fd node-id "/tmp/takesy-frame.png")))
-                   (format t "~%==> FRAME CAPTURED: ~Dx~D fmt=~A stride=~A~%"
-                           (getf info :width) (getf info :height)
-                           (getf info :format) (getf info :stride))
-                   (if (getf info :cursor-x)
-                       (format t "    cursor = (~A,~A) after ~D frame~:P~%"
-                               (getf info :cursor-x) (getf info :cursor-y)
-                               (getf info :frames-waited))
-                       (format t "    cursor = none (meta-attached=~A, waited ~D frames)~%"
-                               (getf info :cursor-meta-attached) (getf info :frames-waited)))
-                   (format t "    PNG    = ~A~%" (getf info :png))))))
+                 (if record
+                     ;; 5a. Record a clip: frame sequence + cursor track (am4.1).
+                     (destructuring-bind (&key (duration 3.0) (fps 30)
+                                               (dir "/tmp/takesy-rec")) record
+                       (format t "~&[5/5] Recording ~,1Fs @ ~Dfps -> ~A ...~%" duration fps dir)
+                       (let* ((rec (takesy/pipewire:record-frames
+                                    fd node-id :duration duration :max-fps fps :dir dir))
+                              (frames (getf rec :frames))
+                              (with-cursor (count-if (lambda (f) (getf f :cursor-x)) frames)))
+                         (format t "~%==> RECORDED ~D frames ~Dx~D fmt=~A -> ~A~%"
+                                 (length frames) (getf rec :width) (getf rec :height)
+                                 (getf rec :format) (getf rec :dir))
+                         (format t "    cursor track: ~D/~D frames have a position~%"
+                                 with-cursor (length frames))
+                         (when frames
+                           (let ((f (find-if (lambda (x) (getf x :cursor-x)) frames)))
+                             (when f
+                               (format t "    e.g. frame ~D @ ~,2Fs cursor=(~A,~A)~%"
+                                       (getf f :i) (getf f :time)
+                                       (getf f :cursor-x) (getf f :cursor-y)))))))
+                     ;; 5b. Single frame + cursor to PNG (bead jme).
+                     (progn
+                       (format t "~&[5/5] Capturing one frame via pure-Lisp libpipewire...~%")
+                       (let ((info (takesy/pipewire:capture-frame-to-png
+                                    fd node-id "/tmp/takesy-frame.png")))
+                         (format t "~%==> FRAME CAPTURED: ~Dx~D fmt=~A stride=~A~%"
+                                 (getf info :width) (getf info :height)
+                                 (getf info :format) (getf info :stride))
+                         (if (getf info :cursor-x)
+                             (format t "    cursor = (~A,~A) after ~D frame~:P~%"
+                                     (getf info :cursor-x) (getf info :cursor-y)
+                                     (getf info :frames-waited))
+                             (format t "    cursor = none (meta-attached=~A, waited ~D frames)~%"
+                                     (getf info :cursor-meta-attached) (getf info :frames-waited)))
+                         (format t "    PNG    = ~A~%" (getf info :png))))))))
         ;; teardown -- ALWAYS close the portal session so Mutter cleanly
         ;; restores cursor/input state; never rely on the connection dropping.
         (close-session bus session))

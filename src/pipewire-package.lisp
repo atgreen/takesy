@@ -13,7 +13,8 @@
 (defpackage #:takesy/pipewire
   (:use #:cl)
   (:nicknames #:tk-pw)
-  (:export #:capture-one-frame #:capture-frame-to-png))
+  (:export #:capture-one-frame #:capture-frame-to-png
+           #:record-frames #:load-recording))
 
 (in-package #:takesy/pipewire)
 
