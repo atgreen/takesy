@@ -41,3 +41,10 @@
   :components ((:module "src"
                 :components ((:file "egl")
                              (:file "compositor")))))
+
+(asdf:defsystem "takesy/demo"
+  :description "End-to-end demo: Director auto-zoom timeline -> compositor mp4."
+  :depends-on ("takesy/director" "takesy/compositor")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "demo")))))
