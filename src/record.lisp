@@ -187,6 +187,7 @@ without an over-large file."
            :path out))))))
 
 (defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
+                           (bg '(0.11 0.12 0.15))
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
   "Full `takesy record`: capture the screen (METADATA cursor mode, armed teardown)
 until you end the share -- click GNOME's Stop button in the top bar -- or DURATION
@@ -207,7 +208,7 @@ length is the ACTUAL captured span, not the cap. Return (values out n-frames)."
            (session  (recording->session rec crop))
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
            (timeline (progn (setf (dir:session-damage session) damage)
-                            (dir:plan-timeline session)))  ; fit zoom to activity
+                            (dir:plan-timeline session :bg bg)))  ; fit zoom to activity
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)

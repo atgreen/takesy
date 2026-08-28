@@ -43,6 +43,25 @@ Signal a usage error on a malformed option."
             (float n 1.0)))
         default)))
 
+(defparameter +color-names+
+  '(("black" 0.0 0.0 0.0) ("white" 1.0 1.0 1.0)
+    ("gray" 0.5 0.5 0.5) ("grey" 0.5 0.5 0.5)
+    ("dark" 0.11 0.12 0.15) ("charcoal" 0.13 0.13 0.14)
+    ("navy" 0.08 0.11 0.20) ("slate" 0.16 0.19 0.24)))
+
+(defun parse-color (str)
+  "Parse a background colour: `#RRGGBB` / `RRGGBB` hex, or a name (black, white,
+gray, dark, navy, slate, ...). Return (r g b) in 0..1."
+  (let ((named (assoc (string-downcase (string-trim " " str)) +color-names+
+                      :test #'string=)))
+    (cond
+      (named (rest named))
+      (t (let ((s (string-left-trim "#" (string-trim " " str))))
+           (unless (and (= (length s) 6) (every (lambda (c) (digit-char-p c 16)) s))
+             (error "bad --bg colour ~S (use #RRGGBB or a name like dark/navy/black)" str))
+           (flet ((h (a b) (/ (parse-integer s :start a :end b :radix 16) 255.0)))
+             (list (h 0 2) (h 2 4) (h 4 6))))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Subcommands.
 
@@ -58,6 +77,7 @@ options:
   --duration S     max seconds (safety)  (default 30)
   --fps    N       output frames/sec     (default 24; static stretches hold)
   --height N        max output height, px (default 1200; never upscales)
+  --bg     COLOR    background: #RRGGBB or a name (black/white/dark/navy/...)
   Pops a screen-share dialog; click GNOME's Stop button (top bar) to finish. The
   cursor hides during capture (auto-zoom needs its position), restored on exit.
 ")
@@ -67,13 +87,15 @@ options:
          (out   (opt o "output" "/tmp/takesy-record.mp4"))
          (dur   (opt-num o "duration" 30.0))
          (fps   (opt-int o "fps" 24))
-         (height (opt-int o "height" 1200)))
+         (height (opt-int o "height" 1200))
+         (bg-str (opt o "bg" nil))
+         (bg    (if bg-str (parse-color bg-str) '(0.11 0.12 0.15))))
     (format t "takesy: recording up to ~,0Fs @ ~Dfps, up to ~Dp tall -> ~A~%" dur fps height out)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
     (multiple-value-bind (path n)
-        (rec:record-to-mp4 :duration dur :fps fps :max-height height :out out)
+        (rec:record-to-mp4 :duration dur :fps fps :max-height height :bg bg :out out)
       (format t "done: wrote ~A (~D frames)~%" path n)
       path)))
 

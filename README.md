@@ -60,6 +60,7 @@ you're done. (If you haven't run `make install`, invoke it as `./takesy`.)
 | `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
+| `--bg COLOR` | background colour — `#RRGGBB` or a name (`black`, `white`, `dark`, `navy`, `slate`, …) | `dark` |
 
 ## How it works
 
