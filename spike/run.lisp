@@ -21,8 +21,13 @@
 
 (load (merge-pathnames "spike/portal-screencast.lisp" (uiop:getcwd)))
 
+;; cursor_mode defaults to EMBEDDED (safe). Opt into METADATA -- which hides the
+;; hardware cursor and exercises the cursor-capture path -- with GS_CURSOR_MODE=4.
+;; Teardown (Session.Close) runs either way; see AGENTS.md hazard #1.
 (handler-case
-    (green-screen/spike:run)
+    (let ((mode (let ((s (uiop:getenv "GS_CURSOR_MODE")))
+                  (if s (parse-integer s) green-screen/spike::+cursor-embedded+))))
+      (green-screen/spike:run :cursor-mode mode))
   (error (e)
     (format *error-output* "~&Spike error: ~A~%" e)
     (uiop:quit 1)))

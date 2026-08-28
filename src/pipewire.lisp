@@ -30,6 +30,9 @@
   loop stream raw-path
   (width 0) (height 0) (format 0) (stride 0)
   cursor-x cursor-y
+  (frames-left 120)                     ; budget to wait for cursor metadata
+  (metas-seen 0) (cursor-meta-seen nil) (last-cursor-id nil)
+  (update-rc nil) (meta-types nil)
   (done nil) (error nil) (n-empty 0))
 
 (defvar *cap* nil)
@@ -65,17 +68,22 @@ Choice(None), so unwrap it: skip choice_type+flags+child-header (16 bytes)."
 ;;; Read SPA_META_Cursor position from a spa_buffer.
 
 (defun read-cursor (spabuf)
+  "Return (values x y meta-present-p cursor-id). META-PRESENT-P is true when a
+SPA_META_Cursor is attached at all (even with id 0); x/y are non-nil only when
+id /= 0 (valid cursor data)."
   (let ((n     (u32@ spabuf +off/spa-buffer/n-metas+))
         (metas (ptr@ spabuf +off/spa-buffer/metas+)))
-    (dotimes (i n (values nil nil))
+    (dotimes (i n (values nil nil nil nil))
       (let ((m (ptr+ metas (* i +sz/spa-meta+))))
         (when (= (u32@ m +off/spa-meta/type+) +spa-meta-cursor+)
-          (let ((md (ptr@ m +off/spa-meta/data+)))
-            (when (/= (u32@ md +off/spa-meta-cursor/id+) 0)
-              (let ((pos (ptr+ md +off/spa-meta-cursor/position+)))
-                (return-from read-cursor
-                  (values (i32@ pos +off/spa-point/x+)
-                          (i32@ pos +off/spa-point/y+)))))))))))
+          (let* ((md (ptr@ m +off/spa-meta/data+))
+                 (id (u32@ md +off/spa-meta-cursor/id+)))
+            (return-from read-cursor
+              (if (/= id 0)
+                  (let ((pos (ptr+ md +off/spa-meta-cursor/position+)))
+                    (values (i32@ pos +off/spa-point/x+)
+                            (i32@ pos +off/spa-point/y+) t id))
+                  (values nil nil t id)))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Callbacks.
@@ -119,7 +127,8 @@ Choice(None), so unwrap it: skip choice_type+flags+child-header (16 bytes)."
         (setf (capture-stride *cap*) stride)
         (setf (cffi:mem-aref arr :pointer 0) bufpod
               (cffi:mem-aref arr :pointer 1) curpod)
-        (pw-stream-update-params (capture-stream *cap*) arr 2)
+        (setf (capture-update-rc *cap*)
+              (pw-stream-update-params (capture-stream *cap*) arr 2))
         (cffi:foreign-free arr)
         (cffi:foreign-free bufpod)
         (cffi:foreign-free curpod)
@@ -140,24 +149,39 @@ Choice(None), so unwrap it: skip choice_type+flags+child-header (16 bytes)."
              (coff    (u32@ chunk +off/spa-chunk/offset+)))
         (cond
           ((and (not (cffi:null-pointer-p dptr)) (> csize 0))
-           ;; Chunk stride/size are ground truth for geometry (32bpp packed).
-           (when (> cstride 0)
-             (setf (capture-stride cap) cstride
-                   (capture-width cap)  (floor cstride 4)
-                   (capture-height cap) (floor csize cstride)))
-           (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
-             (cffi:with-pointer-to-vector-data (dst vec)
-               (cffi:foreign-funcall "memcpy" :pointer dst
-                                     :pointer (ptr+ dptr coff) :size csize :pointer))
-             (with-open-file (s (capture-raw-path cap) :direction :output
-                                                       :element-type '(unsigned-byte 8)
-                                                       :if-exists :supersede)
-               (write-sequence vec s)))
-           (multiple-value-bind (cx cy) (read-cursor spabuf)
-             (setf (capture-cursor-x cap) cx (capture-cursor-y cap) cy))
-           (setf (capture-done cap) t)
-           (pw-stream-queue-buffer stream b)
-           (pw-main-loop-quit (capture-loop cap)))
+           (multiple-value-bind (cx cy present id) (read-cursor spabuf)
+             (let ((nm (u32@ spabuf +off/spa-buffer/n-metas+))
+                   (mp (ptr@ spabuf +off/spa-buffer/metas+)))
+               (setf (capture-metas-seen cap) (max (capture-metas-seen cap) nm)
+                     (capture-meta-types cap)
+                     (loop for i below nm
+                           collect (u32@ (ptr+ mp (* i +sz/spa-meta+))
+                                         +off/spa-meta/type+))))
+             (when present
+               (setf (capture-cursor-meta-seen cap) t (capture-last-cursor-id cap) id))
+             (cond
+               ;; Finish once we have the cursor, or the budget is spent.
+               ((or cx (<= (capture-frames-left cap) 0))
+                (when (> cstride 0)   ; chunk geometry is ground truth (32bpp)
+                  (setf (capture-stride cap) cstride
+                        (capture-width cap)  (floor cstride 4)
+                        (capture-height cap) (floor csize cstride)))
+                (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
+                  (cffi:with-pointer-to-vector-data (dst vec)
+                    (cffi:foreign-funcall "memcpy" :pointer dst
+                                          :pointer (ptr+ dptr coff) :size csize :pointer))
+                  (with-open-file (s (capture-raw-path cap) :direction :output
+                                                            :element-type '(unsigned-byte 8)
+                                                            :if-exists :supersede)
+                    (write-sequence vec s)))
+                (setf (capture-cursor-x cap) cx (capture-cursor-y cap) cy
+                      (capture-done cap) t)
+                (pw-stream-queue-buffer stream b)
+                (pw-main-loop-quit (capture-loop cap)))
+               ;; Got pixels but no cursor metadata yet -- wait for more frames.
+               (t
+                (decf (capture-frames-left cap))
+                (pw-stream-queue-buffer stream b)))))
           (t
            ;; screencast often emits a few empty buffers first; skip them.
            (incf (capture-n-empty cap))
@@ -200,20 +224,28 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
            (events (make-stream-events))
            (cap    (make-capture :loop mloop :stream stream :raw-path raw-path)))
       (dotimes (i +sz/spa-hook+) (setf (cffi:mem-aref hook :uint8 i) 0))
-      (let ((*cap* cap))
-        (pw-stream-add-listener stream hook events (cffi:null-pointer))
-        (let* ((fmt-pod (octets->foreign (build-enum-format-pod)))
-               (params  (cffi:foreign-alloc :pointer :count 1))
-               (flags   (logior +pw-stream-flag-autoconnect+
-                                 +pw-stream-flag-map-buffers+)))
-          (setf (cffi:mem-aref params :pointer 0) fmt-pod)
-          (pw-stream-connect stream +spa-direction-input+ node-id flags params 1)
-          (cffi:foreign-free params)
-          (cffi:foreign-free fmt-pod))
-        (pw-main-loop-run mloop))
-      (pw-stream-destroy stream)
-      (pw-context-destroy ctx)
-      (pw-main-loop-destroy mloop)
+      ;; Everything from add-listener onward is torn down in the cleanup form,
+      ;; so a non-local exit (error in a callback, quit) never leaks the stream
+      ;; or leaves PipeWire initialized -- see AGENTS.md hazard #1.
+      (unwind-protect
+           (let ((*cap* cap))
+             (pw-stream-add-listener stream hook events (cffi:null-pointer))
+             (let* ((fmt-pod (octets->foreign (build-enum-format-pod)))
+                    (params  (cffi:foreign-alloc :pointer :count 1))
+                    (flags   (logior +pw-stream-flag-autoconnect+
+                                      +pw-stream-flag-map-buffers+)))
+               (setf (cffi:mem-aref params :pointer 0) fmt-pod)
+               (pw-stream-connect stream +spa-direction-input+ node-id flags params 1)
+               (cffi:foreign-free params)
+               (cffi:foreign-free fmt-pod))
+             (pw-main-loop-run mloop))
+        (ignore-errors (pw-stream-disconnect stream))
+        (pw-stream-destroy stream)
+        (pw-context-destroy ctx)
+        (pw-main-loop-destroy mloop)
+        (cffi:foreign-free hook)
+        (cffi:foreign-free events)
+        (pw-deinit))
       cap)))
 
 (defun format->ffmpeg-pixfmt (fmt)
@@ -242,7 +274,12 @@ Return a plist describing the frame."
              "-i" raw
              "-frames:v" "1" png-path)
        :output t :error-output t)
+      (format t "  [pw] cursor meta: attached=~A last-id=~A meta-types=~A update-rc=~A~%"
+              (capture-cursor-meta-seen cap) (capture-last-cursor-id cap)
+              (capture-meta-types cap) (capture-update-rc cap))
       (list :width w :height h :format (capture-format cap)
             :stride (capture-stride cap)
             :cursor-x (capture-cursor-x cap) :cursor-y (capture-cursor-y cap)
+            :frames-waited (- 120 (capture-frames-left cap))
+            :cursor-meta-attached (capture-cursor-meta-seen cap)
             :png png-path))))

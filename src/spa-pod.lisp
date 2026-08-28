@@ -179,11 +179,12 @@ common 32-bit packed formats over a wide size/framerate range."
                (lambda () (pod-id buf +spa-meta-cursor+)))
      (pod-prop buf +spa-param-meta-size+
                (lambda ()
-                 ;; enough for position, plus a cursor bitmap up to 256x256 BGRA
+                 ;; position + a cursor bitmap; keep the range generous so the
+                 ;; compositor's chosen size always fits (HiDPI cursors are big).
                  (pod-choice-range-int buf
-                                       (+ 28 20 (* 64 64 4))
+                                       (+ 28 20 (* 128 128 4))
                                        28
-                                       (+ 28 20 (* 256 256 4))))))))
+                                       (* 4 1024 1024)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Foreign-memory handoff.
