@@ -64,17 +64,22 @@ Build a standalone executable (bundles SBCL + all systems):
 sbcl --script build.lisp     # produces ./takesy
 ```
 
-Today it renders the **synthetic** auto-zoom pipeline (Director → compositor)
-end-to-end — no capture, no live desktop — which is how the post-processing is
-validated offline:
+Record your screen — capture → auto-zoom on your activity → composite (padded
+background, rounded corners, drop shadow, eased cursor) → mp4:
 
 ```sh
-./takesy demo --output out.mp4 --width 480 --height 300 --fps 30 --zoom 2.0
+./takesy                     # record; click GNOME's Stop button to finish
+./takesy --output demo.mp4 --duration 20
 ./takesy help
 ```
 
-`takesy record` (real capture → auto-zoom → mp4) is the north-star; the
-remaining wiring is tracked under the `takesy CLI` epic (`bd show green-screen-am4`).
+Recording is the default action. Pick a source in the share dialog, do your
+thing, and click GNOME's screencast **Stop** button in the top bar to finish
+(there's a `--duration` safety cap). The cursor hides during capture (auto-zoom
+needs its position) and is restored on exit.
+
+`./takesy demo` renders the **synthetic** pipeline (no capture, no live desktop)
+— how the post-processing is validated offline.
 
 ## Running the capture spike
 

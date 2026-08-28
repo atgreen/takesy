@@ -50,11 +50,11 @@ Signal a usage error on a malformed option."
   "takesy -- Wayland-native screen recorder (Common Lisp)
 
 Usage:
-  takesy record [options]    Capture your screen -> auto-zoom -> mp4.
+  takesy [options]           Capture your screen -> auto-zoom -> mp4.
   takesy demo [options]      Render the synthetic auto-zoom demo to an mp4.
   takesy help                Show this help.
 
-record options:
+options:
   --output PATH    output mp4            (default /tmp/takesy-record.mp4)
   --duration S     max seconds (safety)  (default 30)
   --fps    N       output frames/sec     (default 24; static stretches hold)
@@ -90,7 +90,7 @@ demo options:
          (dur   (opt-num o "duration" 30.0))
          (fps   (opt-int o "fps" 24))
          (scale (opt-int o "scale" 3)))
-    (format t "takesy record: up to ~,0Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
+    (format t "takesy: recording up to ~,0Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
@@ -100,15 +100,16 @@ demo options:
       path)))
 
 (defun run (args)
-  "Dispatch ARGS (the command-line minus argv0). Return normally on success;
-signal an error on failure. Kept separate from MAIN so it is REPL-callable."
+  "Dispatch ARGS (the command-line minus argv0). Recording is the default action,
+so `takesy [options]` records; `demo` and `help` are the only named subcommands.
+Return normally on success; signal on failure. Separate from MAIN so it is
+REPL-callable."
   (let ((cmd (first args)))
     (cond
-      ((or (null cmd) (member cmd '("help" "--help" "-h") :test #'string=))
-       (write-string +usage+) nil)
-      ((string= cmd "record") (cmd-record (rest args)))
-      ((string= cmd "demo") (cmd-demo (rest args)))
-      (t (error "unknown command ~S (try `takesy help`)" cmd)))))
+      ((member cmd '("help" "--help" "-h") :test #'equal) (write-string +usage+) nil)
+      ((equal cmd "demo") (cmd-demo (rest args)))
+      ((equal cmd "record") (cmd-record (rest args)))  ; still accepted, but optional
+      (t (cmd-record args)))))                          ; default: just record
 
 ;;; ------------------------------------------------------------------
 ;;; Executable entry point (set as :toplevel by build.lisp).
