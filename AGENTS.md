@@ -1,16 +1,16 @@
-# AGENTS.md — working notes for green-screen
+# AGENTS.md — working notes for takesy
 
 Guidance for any agent (or human) hacking on this Wayland-native screen recorder.
 Read the **Hazards** section before running anything that opens a screencast.
 
 ## Project shape
 
-- Pure Common Lisp (SBCL + ocicl). Systems in `green-screen.asd`.
+- Pure Common Lisp (SBCL + ocicl). Systems in `takesy.asd`.
 - Capture path is proven end-to-end: xdg-desktop-portal ScreenCast over the CL
   `dbus` client → SCM_RIGHTS fd → `libpipewire` (pure CFFI) → frame → PNG.
 - Compositor MVP is proven end-to-end (bead `green-screen-7k8`): headless GL
-  (`green-screen/compositor`) renders an eased keyframe timeline
-  (`green-screen/keyframe`, the Director↔Compositor contract) → zoom/pan, padded
+  (`takesy/compositor`) renders an eased keyframe timeline
+  (`takesy/keyframe`, the Director↔Compositor contract) → zoom/pan, padded
   background, rounded corners, drop shadow → H.264 mp4. Stack is **hybrid**:
   reuse `cl-opengl` for GL calls, hand-roll CFFI only for the EGL bootstrap
   (`src/egl.lisp`) that `cl-opengl` omits. Still on a stub timeline + still
@@ -86,7 +86,7 @@ source. It also, per hazard #1, can perturb the live desktop. Therefore:
   milestone has a self-checking entry point in `src/compositor.lisp`
   (`bringup-test`, `texture-1to1-test`, `zoom-crop-test`, `compose-test`,
   `compose-reduction-check`, `compose-shadow-test`, `render-demo`); load
-  `green-screen/compositor` and call one.
+  `takesy/compositor` and call one.
 - **Headless context** comes up via `EGL_PLATFORM_SURFACELESS_MESA` +
   `EGL_DEFAULT_DISPLAY` (routes through glvnd to `libEGL_mesa`, Intel path). The
   `libEGL warning: pci id ... driver (null)` lines are **benign** — glvnd probes

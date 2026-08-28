@@ -10,9 +10,9 @@
 ;;;; whole frame, 2.0 = punch in to half width/height). The later fields drive
 ;;;; M4/M5 (background inset, rounded corners, drop shadow).
 
-(defpackage #:green-screen/keyframe
+(defpackage #:takesy/keyframe
   (:use #:cl)
-  (:nicknames #:gs-kf)
+  (:nicknames #:tk-kf)
   (:export #:keyframe #:make-keyframe #:copy-keyframe #:keyframe-p
            #:keyframe-time #:keyframe-zoom
            #:keyframe-center-x #:keyframe-center-y
@@ -22,7 +22,7 @@
            #:clamp-center #:effective-center
            #:lerp #:ease-smoothstep #:lerp-keyframe #:sample-timeline))
 
-(in-package #:green-screen/keyframe)
+(in-package #:takesy/keyframe)
 
 (defstruct keyframe
   (time 0.0)                     ; seconds

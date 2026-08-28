@@ -1,4 +1,4 @@
-# green-screen
+# takesy
 
 A Wayland-native screen recorder for Linux, in the spirit of [polished](https://screencast) —
 auto-zoom into activity, smoothed cursor motion, and a polished composited output

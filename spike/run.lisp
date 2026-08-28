@@ -13,9 +13,9 @@
  (list :source-registry (list :directory (uiop:getcwd)) :inherit-configuration))
 
 (handler-case
-    (asdf:load-system "green-screen")
+    (asdf:load-system "takesy")
   (error (e)
-    (format *error-output* "~&Failed to load green-screen: ~A~%~
+    (format *error-output* "~&Failed to load takesy: ~A~%~
                             Ensure deps are installed (ocicl install dbus cffi flexi-streams).~%" e)
     (uiop:quit 1)))
 
@@ -26,8 +26,8 @@
 ;; Teardown (Session.Close) runs either way; see AGENTS.md hazard #1.
 (handler-case
     (let ((mode (let ((s (uiop:getenv "GS_CURSOR_MODE")))
-                  (if s (parse-integer s) green-screen/spike::+cursor-embedded+))))
-      (green-screen/spike:run :cursor-mode mode))
+                  (if s (parse-integer s) takesy/spike::+cursor-embedded+))))
+      (takesy/spike:run :cursor-mode mode))
   (error (e)
     (format *error-output* "~&Spike error: ~A~%" e)
     (uiop:quit 1)))

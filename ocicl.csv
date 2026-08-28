@@ -11,6 +11,11 @@ cffi-libffi, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec28
 cffi-tests, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/cffi-tests.asd
 cffi-toolchain, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/cffi-toolchain.asd
 cffi-uffi-compat, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/cffi-uffi-compat.asd
+cl-glu, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf94fea992d075d7df705eb5ce7b3, cl-opengl-20260812-6a4b55d/cl-glu.asd
+cl-glut, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf94fea992d075d7df705eb5ce7b3, cl-opengl-20260812-6a4b55d/cl-glut.asd
+cl-glut-examples, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf94fea992d075d7df705eb5ce7b3, cl-opengl-20260812-6a4b55d/cl-glut-examples.asd
+cl-opengl, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf94fea992d075d7df705eb5ce7b3, cl-opengl-20260812-6a4b55d/cl-opengl.asd
+cl-opengl-examples, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf94fea992d075d7df705eb5ce7b3, cl-opengl-20260812-6a4b55d/cl-opengl-examples.asd
 cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre.asd
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
 cl-xmlspam, ghcr.io/ocicl/cl-xmlspam@sha256:29d1f6c42bce8c5979b594f578ebc609f517ef9fb16e7cc04789a5058e54db8b, cl-xmlspam-20240503-421ee97/cl-xmlspam.asd
@@ -20,8 +25,10 @@ cxml-dom, ghcr.io/ocicl/cxml@sha256:a227da3554997482aa5fcefca12462234febca1200b4
 cxml-klacks, ghcr.io/ocicl/cxml@sha256:a227da3554997482aa5fcefca12462234febca1200b40918cbe90b4681b36981, cxml-20250429-2d8fa42/cxml-klacks.asd
 cxml-test, ghcr.io/ocicl/cxml@sha256:a227da3554997482aa5fcefca12462234febca1200b40918cbe90b4681b36981, cxml-20250429-2d8fa42/cxml-test.asd
 dbus, ghcr.io/ocicl/dbus@sha256:d9b968c9e16bac5ff2db4ac9ff0a753f7d6d321b3e0f2843ff353dfca0222305, dbus-20240503-8bba6a0/dbus.asd
+documentation-utils, ghcr.io/ocicl/documentation-utils@sha256:b2a1b3f3bcd1a738af85ae2b0168d408c177661eab6d6bbebb254e394d983f54, documentation-utils-20230511-98630dd/documentation-utils.asd
 flexi-streams, ghcr.io/ocicl/flexi-streams@sha256:95005b06a8a95c82780c75ead53810bcb273d07fcf5fe76b527f1856df9923f2, flexi-streams-20240503-4951d57/flexi-streams.asd
 flexi-streams-test, ghcr.io/ocicl/flexi-streams@sha256:95005b06a8a95c82780c75ead53810bcb273d07fcf5fe76b527f1856df9923f2, flexi-streams-20240503-4951d57/flexi-streams-test.asd
+float-features, ghcr.io/ocicl/float-features@sha256:8c6019d2c33036229a3a6c81185c3eb7588e5a8c3e9fc1f4eb40939a64c223b9, float-features-20260820-5f54e87/float-features.asd
 global-vars, ghcr.io/ocicl/global-vars@sha256:d197e871c9c9abc4bf31b1186f5fd28f0ca848ebe2e9dddf2d82ecee01dbdc65, global-vars-20240503-c749f32/global-vars.asd
 global-vars-test, ghcr.io/ocicl/global-vars@sha256:d197e871c9c9abc4bf31b1186f5fd28f0ca848ebe2e9dddf2d82ecee01dbdc65, global-vars-20240503-c749f32/global-vars-test.asd
 idna, ghcr.io/ocicl/idna@sha256:b1737dbce42904f75c724350c3e057770c7777f1f5596c6358875dfb2e542eac, idna-20240503-bf789e6/idna.asd
@@ -34,6 +41,7 @@ iolib.conf, ghcr.io/ocicl/iolib@sha256:0f523172cd40b937dc1ed3ecd8d3ac1b5cb41c772
 iolib.examples, ghcr.io/ocicl/iolib@sha256:0f523172cd40b937dc1ed3ecd8d3ac1b5cb41c772c60f7ccbc42b2fa9e315047, iolib-20260812-c939f25/iolib.examples.asd
 ironclad, ghcr.io/ocicl/ironclad@sha256:3117e5a26a3e94924074c3548c235a2b733609ed61a2731880ac9e31df55428b, ironclad-20240503-6da010f/ironclad.asd
 ironclad-text, ghcr.io/ocicl/ironclad@sha256:3117e5a26a3e94924074c3548c235a2b733609ed61a2731880ac9e31df55428b, ironclad-20240503-6da010f/ironclad-text.asd
+multilang-documentation-utils, ghcr.io/ocicl/documentation-utils@sha256:b2a1b3f3bcd1a738af85ae2b0168d408c177661eab6d6bbebb254e394d983f54, documentation-utils-20230511-98630dd/multilang-documentation-utils.asd
 puri, ghcr.io/ocicl/puri@sha256:b803fb9444eaf2c7053812e19d342d4ce6a05fd1880fa3a2a2f824769a6d58d2, puri-20260406-4bbab89/puri.asd
 split-sequence, ghcr.io/ocicl/split-sequence@sha256:3a37662eedd99c42995587b9d443c4631f25c4c523091bcca31a27b880585b8e, split-sequence-2.0.1/split-sequence.asd
 swap-bytes, ghcr.io/ocicl/swap-bytes@sha256:06edc17deb0f27cdf6290689711ece670a8282dfd07b732a9adc541af1ce7ed6, swap-bytes-20240503-43ab141/swap-bytes.asd
@@ -42,4 +50,5 @@ trivial-features-tests, ghcr.io/ocicl/trivial-features@sha256:e278e24d39060fc7d3
 trivial-garbage, ghcr.io/ocicl/trivial-garbage@sha256:84741c1d2d5be9e6b7466a8a7aefd82d74bedf7473b7331937f61e68df162d89, trivial-garbage-20260822-2f293dd/trivial-garbage.asd
 trivial-gray-streams, ghcr.io/ocicl/trivial-gray-streams@sha256:9d702556e5973fd18e67642b18bd5a2f901972ef7d5b134615e2f5fd77396bb9, trivial-gray-streams-20260818-257d73e/trivial-gray-streams.asd
 trivial-gray-streams-test, ghcr.io/ocicl/trivial-gray-streams@sha256:9d702556e5973fd18e67642b18bd5a2f901972ef7d5b134615e2f5fd77396bb9, trivial-gray-streams-20260818-257d73e/trivial-gray-streams-test.asd
+trivial-indent, ghcr.io/ocicl/trivial-indent@sha256:f836220f8b42c9fef8e8e48e94ffa4435be2a743d5c668ae889304a6ac1e29d2, trivial-indent-20260812-5905ac0/trivial-indent.asd
 uffi, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/uffi-compat/uffi.asd

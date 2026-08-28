@@ -22,13 +22,13 @@
 ;;;; Full per-message association (via the UNIX_FDS header) is a documented
 ;;;; follow-up -- see the bead.
 
-(defpackage #:green-screen/dbus-fd
+(defpackage #:takesy/dbus-fd
   (:use #:cl)
   (:local-nicknames (#:d #:dbus)
                     (#:msg #:dbus/messages))
   (:export #:enable-fd-passing #:take-fd #:pending-fd-count))
 
-(in-package #:green-screen/dbus-fd)
+(in-package #:takesy/dbus-fd)
 
 ;;; ------------------------------------------------------------------
 ;;; libc bindings (Linux). Let CFFI compute struct layout/alignment.

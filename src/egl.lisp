@@ -10,14 +10,14 @@
 ;;;; GBM device -- ideal for FBO + glReadPixels. GBM on a DRM render node is the
 ;;;; fallback for drivers without surfaceless support.
 
-(defpackage #:green-screen/egl
+(defpackage #:takesy/egl
   (:use #:cl)
-  (:nicknames #:gs-egl)
+  (:nicknames #:tk-egl)
   (:export #:with-headless-gl #:make-headless-context #:destroy-context
            #:egl-context #:egl-context-display #:egl-context-ctx
            #:egl-context-width #:egl-context-height))
 
-(in-package #:green-screen/egl)
+(in-package #:takesy/egl)
 
 (cffi:define-foreign-library libEGL
   (:unix (:or "libEGL.so.1" "libEGL.so"))

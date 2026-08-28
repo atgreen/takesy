@@ -15,7 +15,7 @@
 ;;;; starts aligned, and validate the whole thing against spa_debug_pod in C
 ;;;; (see src/val-pod.c) before trusting it.
 
-(in-package #:green-screen/pipewire)
+(in-package #:takesy/pipewire)
 
 ;;; ------------------------------------------------------------------
 ;;; Byte buffer primitives.

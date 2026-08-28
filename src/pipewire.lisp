@@ -10,7 +10,7 @@
 ;;;;        process             -> dequeue -> copy pixels + cursor -> quit
 ;;;;   -> ffmpeg raw -> PNG
 
-(in-package #:green-screen/pipewire)
+(in-package #:takesy/pipewire)
 
 ;;; ------------------------------------------------------------------
 ;;; Foreign read helpers.
@@ -219,7 +219,7 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
     (let* ((props  (make-properties "media.type" "Video"
                                     "media.category" "Capture"
                                     "media.role" "Screen"))
-           (stream (pw-stream-new core "green-screen-capture" props))
+           (stream (pw-stream-new core "takesy-capture" props))
            (hook   (cffi:foreign-alloc :uint8 :count +sz/spa-hook+))
            (events (make-stream-events))
            (cap    (make-capture :loop mloop :stream stream :raw-path raw-path)))

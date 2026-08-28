@@ -10,12 +10,12 @@
 ;;;; the SPA_POD_* macros) are static-inline and NOT callable via FFI, so the
 ;;;; format-negotiation PODs are assembled byte-by-byte in Lisp instead.
 
-(defpackage #:green-screen/pipewire
+(defpackage #:takesy/pipewire
   (:use #:cl)
-  (:nicknames #:gs-pw)
+  (:nicknames #:tk-pw)
   (:export #:capture-one-frame #:capture-frame-to-png))
 
-(in-package #:green-screen/pipewire)
+(in-package #:takesy/pipewire)
 
 (cffi:define-foreign-library libpipewire
   (:unix (:or "libpipewire-0.3.so.0" "libpipewire-0.3.so"))

@@ -2,16 +2,16 @@
 ;;;;
 ;;;; Bead green-screen-7k8: GL compositor. Renders raw screen frames + Director
 ;;;; keyframes into polished output (zoom/pan, padded background, rounded
-;;;; corners, drop shadow) -> ffmpeg. Runs headless via green-screen/egl.
+;;;; corners, drop shadow) -> ffmpeg. Runs headless via takesy/egl.
 ;;;;
 ;;;; Milestone M1 (7k8.1): stand up the offscreen context, clear an FBO to a
 ;;;; known colour, read it back, and save a PNG -- proving headless GPU render +
 ;;;; readback works on this box before any real shading.
 
-(defpackage #:green-screen/compositor
+(defpackage #:takesy/compositor
   (:use #:cl)
-  (:local-nicknames (#:egl #:green-screen/egl)
-                    (#:kf  #:green-screen/keyframe))
+  (:local-nicknames (#:egl #:takesy/egl)
+                    (#:kf  #:takesy/keyframe))
   (:export #:bringup-test #:texture-1to1-test #:zoom-crop-test
            #:compose-test #:compose-reduction-check #:compose-shadow-test
            #:render-timeline #:render-demo
@@ -19,7 +19,7 @@
            #:make-texture-rgba #:draw-textured-quad #:draw-zoom #:draw-compose
            #:make-test-pattern #:make-gradient-pattern))
 
-(in-package #:green-screen/compositor)
+(in-package #:takesy/compositor)
 
 ;;; ------------------------------------------------------------------
 ;;; Offscreen framebuffer.
@@ -74,7 +74,7 @@ solid clear has no source and no meaningful orientation.)"
 ;;; ------------------------------------------------------------------
 ;;; M1 bring-up.
 
-(defun bringup-test (&key (width 640) (height 360) (path "/tmp/gs-egl-bringup.png"))
+(defun bringup-test (&key (width 640) (height 360) (path "/tmp/tk-egl-bringup.png"))
   "Headless EGL -> FBO -> clear to a known colour -> read back -> PNG.
 Return the PNG path. Prints the centre pixel so success is checkable in a script."
   (egl:with-headless-gl (ctx width height)
@@ -82,7 +82,7 @@ Return the PNG path. Prints the centre pixel so success is checkable in a script
     (format t "  [gl] renderer=~A version=~A~%"
             (gl:get-string :renderer) (gl:get-string :version))
     (multiple-value-bind (fbo rbo) (make-fbo width height)
-      (gl:clear-color 0.10 0.60 0.30 1.0)   ; a green-screen green
+      (gl:clear-color 0.10 0.60 0.30 1.0)   ; a chroma-key green
       (gl:clear :color-buffer-bit)
       (gl:finish)
       (let* ((rgba (read-rgba width height))

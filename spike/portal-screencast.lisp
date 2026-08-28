@@ -12,13 +12,13 @@
 ;;;; real result arrives later as a `Response' signal (u response, a{sv} results)
 ;;;; on that path. We add a match rule for those signals and wait for each one.
 
-(defpackage #:green-screen/spike
+(defpackage #:takesy/spike
   (:use #:cl)
   (:local-nicknames (#:d #:dbus)
                     (#:dc #:dbus/connections))
   (:export #:run))
 
-(in-package #:green-screen/spike)
+(in-package #:takesy/spike)
 
 (defparameter +portal-dest+ "org.freedesktop.portal.Desktop")
 (defparameter +portal-path+ "/org/freedesktop/portal/desktop")
@@ -163,7 +163,7 @@ Mutter's cursor/input state (AGENTS.md hazard #1)."
     ;; Upgrade the connection so it can receive SCM_RIGHTS fds (bead sz0).
     ;; Do this before any of our own method calls so the read path is recvmsg
     ;; from here on.
-    (green-screen/dbus-fd:enable-fd-passing bus)
+    (takesy/dbus-fd:enable-fd-passing bus)
     (format t "Connection upgraded for Unix-fd passing.~%")
 
     ;; Receive Response signals from the portal.
@@ -220,15 +220,15 @@ Mutter's cursor/input state (AGENTS.md hazard #1)."
                (format t "~&[4/4] OpenPipeWireRemote (retrieving real fd)...~%")
                (let ((fd (progn
                            (call-portal bus "OpenPipeWireRemote" "oa{sv}" (list session (sv)))
-                           (green-screen/dbus-fd:take-fd bus))))
+                           (takesy/dbus-fd:take-fd bus))))
                  (format t "      captured fd = ~S (node ~A)~%" fd node-id)
                  (unless (and (integerp fd) (>= fd 0))
                    (error "OpenPipeWireRemote did not deliver a usable fd."))
 
                  ;; 5. Native PipeWire capture: one frame + cursor (bead jme).
                  (format t "~&[5/5] Capturing one frame via pure-Lisp libpipewire...~%")
-                 (let ((info (green-screen/pipewire:capture-frame-to-png
-                              fd node-id "/tmp/green-screen-frame.png")))
+                 (let ((info (takesy/pipewire:capture-frame-to-png
+                              fd node-id "/tmp/takesy-frame.png")))
                    (format t "~%==> FRAME CAPTURED: ~Dx~D fmt=~A stride=~A~%"
                            (getf info :width) (getf info :height)
                            (getf info :format) (getf info :stride))
