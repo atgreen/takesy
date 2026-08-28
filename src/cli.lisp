@@ -56,11 +56,11 @@ Usage:
 
 record options:
   --output PATH    output mp4            (default /tmp/takesy-record.mp4)
-  --duration S     seconds to record     (default 4)
+  --duration S     max seconds (safety)  (default 30)
   --fps    N       output frames/sec     (default 24; static stretches hold)
   --scale  K       downsample output 1/K (default 3)
-  Pops a screen-share dialog; the cursor hides during capture (auto-zoom needs
-  its position) and is restored on exit.
+  Pops a screen-share dialog; click GNOME's Stop button (top bar) to finish. The
+  cursor hides during capture (auto-zoom needs its position), restored on exit.
 
 demo options:
   --output PATH    output mp4            (default /tmp/takesy-director.mp4)
@@ -87,12 +87,13 @@ demo options:
 (defun cmd-record (args)
   (let* ((o     (parse-kv args))
          (out   (opt o "output" "/tmp/takesy-record.mp4"))
-         (dur   (opt-num o "duration" 4.0))
+         (dur   (opt-num o "duration" 30.0))
          (fps   (opt-int o "fps" 24))
          (scale (opt-int o "scale" 3)))
-    (format t "takesy record: ~,1Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
+    (format t "takesy record: up to ~,0Fs @ ~Dfps, scale 1/~D -> ~A~%" dur fps scale out)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
-                 the cursor hides during capture (auto-zoom needs it) and is restored on exit.~%")
+                 click GNOME's Stop button (top bar) to finish; the cursor hides~%~
+                 during capture (auto-zoom needs it) and is restored on exit.~%")
     (multiple-value-bind (path n)
         (rec:record-to-mp4 :duration dur :fps fps :scale scale :out out)
       (format t "done: wrote ~A (~D frames)~%" path n)

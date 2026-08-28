@@ -34,11 +34,11 @@
   (metas-seen 0) (cursor-meta-seen nil) (last-cursor-id nil)
   (update-rc nil) (meta-types nil)
   ;; recording mode (am4.1): capture many frames over a deadline instead of one.
-  (record-p nil) (record-dir nil)
+  (record-p nil) (record-dir nil) (streamed-p nil)
   ;; record-start is nil until the first frame actually arrives (the clock starts
   ;; then, so negotiation latency doesn't shorten the clip -- bead am4.7).
   (record-start nil) (record-duration 0) (record-min-dt 0) (record-last nil)
-  (n-saved 0) (frames '())
+  (max-frames 0) (n-saved 0) (frames '())
   (done nil) (error nil) (n-empty 0))
 
 (defvar *cap* nil)
@@ -107,7 +107,20 @@ id /= 0 (valid cursor data)."
                   ((= state +pw-stream-state-unconnected+) "unconnected")
                   ((= state +pw-stream-state-error+) "error")
                   (t state))
-            (capture-error *cap*))))
+            (capture-error *cap*))
+    ;; Stop-on-user-end (am4.10): once we've been streaming, dropping back to
+    ;; unconnected/error means the user ended the share (e.g. clicked GNOME's
+    ;; Stop button) or the compositor tore it down -> finish the recording.
+    (let ((cap *cap*))
+      (cond
+        ((= state +pw-stream-state-streaming+)
+         (setf (capture-streamed-p cap) t))
+        ((and (capture-record-p cap) (capture-streamed-p cap)
+              (or (= state +pw-stream-state-unconnected+)
+                  (= state +pw-stream-state-error+)))
+         (format t "  [pw] share ended -> stopping recording~%")
+         (setf (capture-done cap) t)
+         (when (capture-loop cap) (pw-main-loop-quit (capture-loop cap))))))))
 
 (cffi:defcallback cb-param-changed :void
     ((data :pointer) (id :uint32) (param :pointer))
@@ -160,7 +173,11 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
       (setf (capture-record-start cap) now))
     (let ((deadline (+ (capture-record-start cap) (capture-record-duration cap))))
      (cond
-      ((>= now deadline)
+      ;; safety caps: the max duration elapsed, or the frame backstop was hit
+      ;; (4K frames are ~37MB each). Normal stop is the user ending the share.
+      ((or (>= now deadline)
+           (and (plusp (capture-max-frames cap))
+                (>= (capture-n-saved cap) (capture-max-frames cap))))
        (setf (capture-done cap) t)
        (pw-stream-queue-buffer stream b)
        (pw-main-loop-quit (capture-loop cap)))
@@ -312,13 +329,19 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
       (%run-and-teardown mloop ctx stream node-id cap)
       cap)))
 
-(defun record-frames (fd node-id &key (duration 3.0) (max-fps 30)
+(defun record-frames (fd node-id &key (duration 30.0) (max-fps 30) (max-frames 250)
                                       (dir "/tmp/takesy-rec"))
-  "Record DURATION seconds from NODE-ID into DIR: one BGRx file per kept frame
-(throttled to MAX-FPS) plus a per-frame cursor track. Return a plist:
-  (:width :height :stride :format :fps :dir :frames), where :frames is a list of
-  (:i :time :cursor-x :cursor-y :path) in capture order."
+  "Record from NODE-ID into DIR until the user ends the share (stream drops after
+streaming -- cb-state-changed quits the loop), or one of the safety caps trips:
+DURATION seconds (from the first frame) or MAX-FRAMES kept frames (4K frames are
+~37MB each). Saves one BGRx file per kept frame (throttled to MAX-FPS) plus a
+per-frame cursor track. Return a plist (:width :height :stride :format :fps :dir
+:frames); :frames is a list of (:i :time :cursor-x :cursor-y :path) in order."
   (ensure-directories-exist (concatenate 'string (string-right-trim "/" dir) "/"))
+  ;; clear stale frames from a previous recording so disk use stays bounded
+  (dolist (f (directory (merge-pathnames "frame-*.bgrx"
+                                         (concatenate 'string (string-right-trim "/" dir) "/"))))
+    (ignore-errors (delete-file f)))
   (multiple-value-bind (mloop ctx stream) (%open-stream fd node-id)
     (let* ((cap (make-capture :loop mloop :stream stream
                               :record-p t
@@ -326,6 +349,7 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
                               ;; clock starts on the first frame (%record-frame)
                               :record-duration
                               (round (* duration internal-time-units-per-second))
+                              :max-frames max-frames
                               :record-min-dt
                               (round (/ internal-time-units-per-second (max 1 max-fps))))))
       (%run-and-teardown mloop ctx stream node-id cap)

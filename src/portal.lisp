@@ -96,11 +96,13 @@ dict on success; error otherwise."
   "Best-effort org.freedesktop.portal.Session.Close on SESSION, so Mutter cleanly
 restores cursor/input state (never rely on the connection dropping)."
   (when session
-    (handler-case
-        (d:invoke-method (d:bus-connection bus) "Close"
-                         :path session :interface +session-iface+
-                         :destination +portal-dest+ :signature "" :arguments '())
-      (error (e) (format *error-output* "  WARNING: Session.Close failed: ~A~%" e)))))
+    ;; If the user ended the share (GNOME Stop), the session is already gone and
+    ;; Close errors with "does not exist" -- that's success (Mutter already
+    ;; restored state), so keep it quiet; it's best-effort either way.
+    (ignore-errors
+     (d:invoke-method (d:bus-connection bus) "Close"
+                      :path session :interface +session-iface+
+                      :destination +portal-dest+ :signature "" :arguments '()))))
 
 ;;; ------------------------------------------------------------------
 ;;; The public entry: open a screencast, run BODY with (fd node-id) bound, and

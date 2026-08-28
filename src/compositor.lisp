@@ -585,6 +585,8 @@ ffmpeg ships libopenh264 but not libx264.")
            "-c:v" encoder "-pix_fmt" "yuv420p"
            "-movflags" "+faststart" path)
      :output t :error-output t)
+    ;; the raw dump can be gigabytes (uncompressed RGBA); drop it once encoded.
+    (ignore-errors (delete-file raw))
     (format t "  [enc] ~D frames @ ~Dfps (~A) -> ~A~%" n fps encoder path)
     (values path n)))
 

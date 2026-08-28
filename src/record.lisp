@@ -81,13 +81,17 @@ compositor delivered frames. SCALE downsamples the 4K source for a sane encode."
          :cursor-fn cursor-fn
          :path out)))))
 
-(defun record-to-mp4 (&key (duration 4.0) (fps 24) (scale 3)
+(defun record-to-mp4 (&key (duration 30.0) (fps 24) (scale 3)
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
-  "Full `takesy record`: capture DURATION seconds (METADATA cursor mode, armed
-teardown), auto-zoom via the Director (dwell-based, no evdev needed), and render
-the real captured frames to a full-length mp4 at OUT. FPS is the OUTPUT frame
-rate; static stretches hold the last frame. Return (values out n-frames)."
+  "Full `takesy record`: capture the screen (METADATA cursor mode, armed teardown)
+until you end the share -- click GNOME's Stop button in the top bar -- or DURATION
+seconds elapse as a safety cap. Then auto-zoom via the Director (dwell-based) and
+render the real captured frames to a full-length mp4 at OUT, with the eased cursor
+overlay. FPS is the OUTPUT rate; static stretches hold the last frame. The output
+length is the ACTUAL captured span, not the cap. Return (values out n-frames)."
   (portal:with-screencast (fd node :cursor-mode portal:+cursor-metadata+)
+    (format t "  [record] recording... click the Stop button in the GNOME top bar ~
+                 to finish (or ~,0Fs max).~%" duration)
     ;; Capture throttle a bit above the output rate so we keep enough source
     ;; frames; the real limit is the compositor's on-change delivery.
     (let* ((rec      (pw:record-frames fd node :duration duration
@@ -102,5 +106,7 @@ rate; static stretches hold the last frame. Return (values out n-frames)."
               (length (getf rec :frames))
               (length (dir:session-cursor session))
               (length timeline))
+      ;; No :duration -> compose uses the actual captured span (you decide the
+      ;; length by when you click Stop).
       (compose-recording rec timeline :out out :scale scale
-                         :fps fps :duration duration :cursor-session eased))))
+                         :fps fps :cursor-session eased))))
