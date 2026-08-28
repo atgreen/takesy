@@ -6,6 +6,11 @@
 # Spike output
 /scratch/
 *.png
+# Built executable (produced by build.lisp)
+/takesy
+# Video output
+*.mp4
+*.raw
 # Editor
 *~
 .#*

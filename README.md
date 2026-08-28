@@ -56,7 +56,27 @@ ancillary handling — so it cannot retrieve the actual fd from `OpenPipeWireRem
 transport needs a small extension (tracked in beads). The handshake up to the PipeWire
 **node id** works with the library as-is.
 
-## Running the spike
+## The `takesy` CLI
+
+Build a standalone executable (bundles SBCL + all systems):
+
+```sh
+sbcl --script build.lisp     # produces ./takesy
+```
+
+Today it renders the **synthetic** auto-zoom pipeline (Director → compositor)
+end-to-end — no capture, no live desktop — which is how the post-processing is
+validated offline:
+
+```sh
+./takesy demo --output out.mp4 --width 480 --height 300 --fps 30 --zoom 2.0
+./takesy help
+```
+
+`takesy record` (real capture → auto-zoom → mp4) is the north-star; the
+remaining wiring is tracked under the `takesy CLI` epic (`bd show green-screen-am4`).
+
+## Running the capture spike
 
 Requires: SBCL, ocicl (deps auto-resolve), and a live Wayland session with
 `xdg-desktop-portal` (GNOME/KDE). Running it pops the desktop's "share your screen" dialog.

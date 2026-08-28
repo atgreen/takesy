@@ -48,3 +48,10 @@
   :serial t
   :components ((:module "src"
                 :components ((:file "demo")))))
+
+(asdf:defsystem "takesy/cli"
+  :description "takesy command-line entry point (build the executable with build.lisp)."
+  :depends-on ("takesy/demo")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "cli")))))
