@@ -20,3 +20,11 @@
   :serial t
   :components ((:module "src"
                 :components ((:file "dbus-fd-passing")))))
+
+(asdf:defsystem "green-screen/compositor"
+  :description "Headless GL compositor: zoom/pan, background, rounded corners, shadow."
+  :depends-on ("cffi" "cl-opengl")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "egl")
+                             (:file "compositor")))))
