@@ -3,8 +3,8 @@
 ;;;; director.lisp
 ;;;;
 ;;;; Bead green-screen-wtd: the Director -- the post-processing "value-add" that
-;;;; turns a raw capture (cursor track + input events) into a polished
-;;;; motion plan: eased cursor path + auto-zoom keyframe timeline. Pure Lisp, no
+;;;; turns a raw capture (cursor track + input events) into a polished motion
+;;;; plan: eased cursor path + auto-zoom keyframe timeline. Pure Lisp, no
 ;;;; GL/portal, so it is fully testable offline with synthetic sessions (the same
 ;;;; discipline the compositor used with synthetic textures). Its output is a
 ;;;; list of takesy/keyframe structs, which the compositor already renders.
@@ -262,8 +262,8 @@ Each qualifying dwell yields a segment focused on the mean dwell position."
 ;;; Zoom scheduling. Each activity segment becomes a punch-in: ease from wide to
 ;;; a zoom centred on the segment focus shortly BEFORE it starts (LEAD), hold
 ;;; through it, then ease back to wide after an idle TAIL. Frame styling
-;;; (padding/corner/shadow/bg) is held constant -- only zoom + pan animate, the
-;;; polished convention. Output is a takesy/keyframe timeline, sorted and
+;;; (padding/corner/shadow/bg) is held constant -- only zoom + pan animate.
+;;; Output is a takesy/keyframe timeline, sorted and
 ;;; bracketed by wide frames at t=0 and the session end.
 
 (defparameter *zoom-level* 1.8 "Punch-in zoom factor for activity. REPL-tunable.")
@@ -346,8 +346,8 @@ meets the opening frame), keep the more-zoomed one so activity wins."
 
 (defun schedule-zooms (session segments
                        &key (zoom *zoom-level*) (lead *zoom-lead*) (tail *zoom-tail*)
-                            (padding 0.06) (corner 0.10)
-                            (shadow-blur 0.05) (shadow-alpha 0.5)
+                            (padding 0.04) (corner 0.09)
+                            (shadow-blur 0.03) (shadow-alpha 0.5)
                             (bg '(0.11 0.12 0.15)))
   "Turn activity SEGMENTS into a keyframe timeline over SESSION's duration.
 Segments closer than *zoom-merge-gap* are merged into one sustained zoom that
@@ -383,8 +383,8 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
 (defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
                                    (zoom *zoom-level*)
                                    (lead *zoom-lead*) (tail *zoom-tail*)
-                                   (padding 0.06) (corner 0.10)
-                                   (shadow-blur 0.05) (shadow-alpha 0.5)
+                                   (padding 0.04) (corner 0.09)
+                                   (shadow-blur 0.03) (shadow-alpha 0.5)
                                    (bg '(0.11 0.12 0.15)))
   "Full Director pass: SESSION -> activity segments -> zoom keyframe timeline
 directly renderable by the compositor's render-timeline. ACTIVITY selects the

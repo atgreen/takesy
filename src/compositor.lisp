@@ -227,7 +227,7 @@ top-left quadrant in B. Distinct per pixel so a 1:1 compare is meaningful."
 ;;; ------------------------------------------------------------------
 ;;; M3 (7k8.3): zoom/pan. The fragment shader samples a sub-window of the source
 ;;; -- centred on the keyframe focal point, sized 1/zoom -- and maps it to the
-;;; full output. This is the polished "punch in on the action" transform.
+;;; full output. This is the auto-zoom "punch in on the action" transform.
 
 (defparameter +fs-zoom+
   "#version 330 core
@@ -357,7 +357,7 @@ and assert an exact byte-for-byte match. Also writes PATH for eyeballing."
           path)))))
 
 ;;; ------------------------------------------------------------------
-;;; M4 (7k8.4): the polished look. Draw the (zoomed) screen inset on a
+;;; M4 (7k8.4): the polished inset look. Draw the (zoomed) screen inset on a
 ;;; padded background, masked to a rounded rectangle. All in one fragment shader:
 ;;; a signed-distance rounded-box gives an antialiased edge; inside the box we
 ;;; sample the zoomed source, outside we show the background.
@@ -384,10 +384,10 @@ float sd_round_box(vec2 p, vec2 b, float r) {
 
 void main() {
   vec2  P   = v_uv * u_canvas;                     // pixel coordinate
-  float m   = u_padding * min(u_canvas.x, u_canvas.y);
-  vec2  lo  = vec2(m);
-  vec2  hi  = u_canvas - vec2(m);
-  vec2  sz  = hi - lo;                             // content rect size
+  vec2  pad = u_padding * u_canvas;                // per-axis padding: the inset
+  vec2  lo  = pad;                                 // keeps the source aspect (no
+  vec2  hi  = u_canvas - pad;                      // stretch), since the canvas
+  vec2  sz  = hi - lo;                             // already matches it
   vec2  ctr = 0.5 * (lo + hi);
   vec2  b   = 0.5 * sz;
   float r   = u_corner * min(sz.x, sz.y);
@@ -650,8 +650,8 @@ float sd_round_box(vec2 p, vec2 b, float r) {
 }
 void main() {
   vec2 P = v_uv * u_canvas;
-  float m = u_padding * min(u_canvas.x, u_canvas.y);
-  vec2 lo=vec2(m), hi=u_canvas-vec2(m), sz=hi-lo, ctr=0.5*(lo+hi);
+  vec2 pad = u_padding * u_canvas;
+  vec2 lo=pad, hi=u_canvas-pad, sz=hi-lo, ctr=0.5*(lo+hi);
   if (sd_round_box(P-ctr, 0.5*sz, u_corner*min(sz.x,sz.y)) > 0.0) discard;
   // arrow: tip at hotspot, body toward +x/+y (image right/down)
   vec2 L = (P - u_cursor) / u_size;
@@ -668,11 +668,12 @@ framebuffer pixel position. Return (values px py visible-p) -- visible-p is nil
 when the cursor falls outside the zoomed content view."
   (let* ((ec (kf:effective-center keyframe))
          (z  (kf:keyframe-zoom keyframe))
-         (m  (* (kf:keyframe-padding keyframe) (min out-w out-h)))
-         (sx (- out-w (* 2 m))) (sy (- out-h (* 2 m)))
+         (p  (kf:keyframe-padding keyframe))
+         (mx (* p out-w)) (my (* p out-h))       ; per-axis padding, matches shader
+         (sx (- out-w (* 2 mx))) (sy (- out-h (* 2 my)))
          (cuvx (+ 0.5 (* (- (car cursor-uv) (car ec)) z)))
          (cuvy (+ 0.5 (* (- (cdr cursor-uv) (cdr ec)) z))))
-    (values (+ m (* cuvx sx)) (+ m (* cuvy sy))
+    (values (+ mx (* cuvx sx)) (+ my (* cuvy sy))
             (and (<= 0.0 cuvx 1.0) (<= 0.0 cuvy 1.0)))))
 
 (defun draw-cursor (program vao px py size keyframe out-w out-h)
