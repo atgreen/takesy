@@ -602,26 +602,46 @@ bitrate scaled to resolution (~0.12 bits/pixel, screen content compresses well).
 (defstruct (frame-encoder (:constructor %make-frame-encoder))
   proc stream path encoder mux)
 
+(defun %gif-output-p (path)
+  "T if PATH names a .gif output (case-insensitive)."
+  (let ((s (string-downcase (namestring path))))
+    (and (>= (length s) 4) (string= (subseq s (- (length s) 4)) ".gif"))))
+
 (defun %open-frame-encoder (path width height fps &key audio)
-  "Launch ffmpeg reading rawvideo RGBA WxH from stdin, encoding H.264 to PATH
-(muxing AUDIO if given, trimmed to the shorter stream). Return a FRAME-ENCODER:
-write each frame's bytes to its STREAM, then %CLOSE-FRAME-ENCODER to finalize."
-  (let* ((encoder (pick-h264-encoder))
-         (mux     (and audio (probe-file audio)))
-         (proc (uiop:launch-program
-                (append
-                 (list "ffmpeg" "-y" "-loglevel" "error"
-                       "-f" "rawvideo" "-pix_fmt" "rgba"
-                       "-s" (format nil "~Dx~D" width height)
-                       "-r" (format nil "~D" fps) "-i" "pipe:0")
-                 (when mux (list "-i" (namestring mux)))
-                 (list "-c:v" encoder)
-                 (%quality-flags encoder width height fps)
-                 (when mux (list "-c:a" "aac" "-b:a" "192k" "-shortest"))
-                 (list "-pix_fmt" "yuv420p" "-movflags" "+faststart" path))
-                ;; stderr discarded so ffmpeg never blocks on an undrained pipe;
-                ;; our writes get natural backpressure from ffmpeg reading stdin.
-                :input :stream :output nil :error-output nil)))
+  "Launch ffmpeg reading rawvideo RGBA WxH from stdin, encoding to PATH. Encodes
+H.264 (muxing AUDIO if given, trimmed to the shorter stream), or -- when PATH ends
+in .gif -- an animated GIF via a single-pass palette filtergraph (no audio; GIFs
+have none). Return a FRAME-ENCODER: write each frame's bytes to its STREAM, then
+%CLOSE-FRAME-ENCODER to finalize."
+  (let* ((gif     (%gif-output-p path))
+         (encoder (if gif "gif" (pick-h264-encoder)))
+         (mux     (and (not gif) audio (probe-file audio)))
+         (input   (list "ffmpeg" "-y" "-loglevel" "error"
+                        "-f" "rawvideo" "-pix_fmt" "rgba"
+                        "-s" (format nil "~Dx~D" width height)
+                        "-r" (format nil "~D" fps) "-i" "pipe:0"))
+         (cmd     (if gif
+                      ;; one-pass high-quality GIF: build a per-clip palette and
+                      ;; apply it in the same graph (works over the stdin stream,
+                      ;; which a two-pass palettegen file could not re-read).
+                      (append input
+                              (list "-vf"
+                                    (concatenate 'string
+                                     "split[a][b];[a]palettegen=stats_mode=diff[p];"
+                                     "[b][p]paletteuse=dither=bayer:diff_mode=rectangle")
+                                    path))
+                      (append input
+                              (when mux (list "-i" (namestring mux)))
+                              (list "-c:v" encoder)
+                              (%quality-flags encoder width height fps)
+                              (when mux (list "-c:a" "aac" "-b:a" "192k" "-shortest"))
+                              (list "-pix_fmt" "yuv420p" "-movflags" "+faststart" path))))
+         ;; stderr discarded so ffmpeg never blocks on an undrained pipe; our
+         ;; writes get natural backpressure from ffmpeg reading stdin.
+         (proc (uiop:launch-program cmd :input :stream
+                                        :output nil :error-output nil)))
+    (when (and gif audio)
+      (format t "  [enc] gif output -- audio not included (GIFs have no audio)~%"))
     (%make-frame-encoder :proc proc :stream (uiop:process-info-input proc)
                          :path path :encoder encoder :mux mux)))
 

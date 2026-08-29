@@ -55,6 +55,7 @@ takesy                                 # record; click Stop in the top bar to fi
 takesy --output talk.mp4 --duration 20
 takesy --audio both                    # record desktop sound + mic too
 takesy --cursor arrow.png              # use a custom cursor image
+takesy --output demo.gif               # straight to an animated GIF (no audio)
 takesy help
 ```
 
@@ -79,7 +80,7 @@ auto-zoom and compositing over it, honouring all the options below.
 
 | Option | Meaning | Default |
 | --- | --- | --- |
-| `--output PATH` | output mp4 | `/tmp/takesy-record.mp4` |
+| `--output PATH` | output file; a `.gif` path produces an animated GIF (no audio) instead of an mp4 | `/tmp/takesy-record.mp4` |
 | `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |

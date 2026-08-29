@@ -102,7 +102,8 @@ Capture once, render many: `takesy capture` writes a self-contained recording di
 you can try different --bg / --zoom / cursor tuning without re-recording.
 
 options:
-  --output PATH    output mp4            (default /tmp/takesy-record.mp4)
+  --output PATH    output file           (default /tmp/takesy-record.mp4;
+                                          a .gif path makes an animated GIF, no audio)
   --dir    PATH    recording dir         (default /tmp/takesy-rec; capture/record)
   --duration S     max seconds (safety)  (default 30; capture/record)
   --fps    N       output frames/sec     (default 24; static stretches hold)
