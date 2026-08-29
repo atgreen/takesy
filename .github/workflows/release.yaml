@@ -359,13 +359,9 @@ jobs:
         with:
           name: rpm-repo
           path: /tmp/rpms/repodata/
-
-      - name: Upload RPM GPG key
-        if: ${{ hashFiles('/tmp/rpms/RPM-GPG-KEY-takesy') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: rpm-repo-key
-          path: /tmp/rpms/RPM-GPG-KEY-takesy
+      # The public signing key is a committed static file
+      # (docs/rpm-repo/RPM-GPG-KEY-takesy), published by the deploy-pages
+      # checkout -- no CI export/upload needed.
 
   # ========================================
   # Build DEB repository metadata
@@ -472,13 +468,6 @@ jobs:
         with:
           name: rpm-repo
           path: docs/rpm-repo/repodata
-
-      - name: Download RPM GPG key
-        uses: actions/download-artifact@v4
-        with:
-          name: rpm-repo-key
-          path: docs/rpm-repo
-        continue-on-error: true
 
       - name: Download DEB repo artifact
         uses: actions/download-artifact@v4
