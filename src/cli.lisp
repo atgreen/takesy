@@ -108,7 +108,8 @@ options:
   --duration S     max seconds (safety)  (default 30; capture/record)
   --fps    N       output frames/sec     (default 24; static stretches hold)
   --height N        max output height, px (default 1200; never upscales)
-  --bg     COLOR    background: #RRGGBB or a name (black/white/dark/navy/...)
+  --bg     COLOR    background: #RRGGBB, a name (black/white/dark/navy/...),
+                    or `blur` (a frosted, blurred copy of the screen)
   --bg-image PATH   background image (png/...), cover-fit behind the inset;
                     overrides --bg
   --corner-radius F rounded-corner radius, fraction of content (default 0.09;
@@ -138,10 +139,13 @@ Distributed under the MIT license; this is free software with NO WARRANTY.
 (defun %render-args (o)
   "Extract RENDER-RECORDING keyword args (direction tuning + output) from the
 option alist O, applying defaults. Shared by `record` and `render`."
-  (let ((bg-str (opt o "bg" nil)))
+  (let* ((bg-str  (opt o "bg" nil))
+         (bg-blur (and bg-str (string-equal (string-trim " " bg-str) "blur"))))
     (list :fps               (opt-int o "fps" 24)
           :max-height        (opt-int o "height" 1200)
-          :bg                (if bg-str (parse-color bg-str) '(0.11 0.12 0.15))
+          :bg-blur           bg-blur
+          :bg                (if (and bg-str (not bg-blur))
+                                 (parse-color bg-str) '(0.11 0.12 0.15))
           :bg-image          (opt o "bg-image" nil)
           :corner            (opt-num o "corner-radius" 0.09)
           :cursor            (opt o "cursor" nil)

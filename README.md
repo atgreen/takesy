@@ -117,7 +117,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
-| `--bg COLOR` | background colour — `#RRGGBB` or a name (`black`, `white`, `dark`, `navy`, `slate`, …) | `dark` |
+| `--bg COLOR` | background — `#RRGGBB`, a name (`black`, `white`, `dark`, `navy`, `slate`, …), or `blur` (a frosted, blurred copy of the screen) | `dark` |
 | `--bg-image PATH` | background image (PNG or anything ffmpeg reads), cover-fit behind the inset; overrides `--bg` | — |
 | `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
 | `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
