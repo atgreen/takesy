@@ -24,5 +24,7 @@ override_dh_dwz:
 	# dwz would likewise mangle the dumped core.
 
 override_dh_auto_clean:
+	# Only remove the built binary. Do NOT run `make clean` (dh_auto_clean) --
+	# it would delete OPEN-SOURCE-NOTICES.txt, which dpkg-buildpackage's early
+	# clean phase runs before the build, wiping the file we install below.
 	rm -f takesy
-	dh_auto_clean
