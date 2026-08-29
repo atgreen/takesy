@@ -168,27 +168,36 @@ Return (values vao vbo)."
     (gl:vertex-attrib-pointer 1 2 :float nil 16 8)
     (values vao vbo)))
 
-(defun make-texture-rgba (bytes w h &key (source-format :rgba) (filter :nearest))
+(defun make-texture-rgba (bytes w h &key (source-format :rgba) (filter :nearest)
+                                         (mipmap nil))
   "Upload BYTES (a (unsigned-byte 8) vector, len w*h*4) as an RGBA8 texture.
 SOURCE-FORMAT is how GL should read the bytes: :rgba, or :bgra for captured
 frames (SPA BGRx, fmt=8) so R/B land correctly with no shader change. FILTER is
-:nearest (exact 1:1) or :linear (smooth when scaled)."
+:nearest (exact 1:1) or :linear (smooth when scaled). MIPMAP t builds a mip chain
+and selects trilinear minification -- essential quality when the source is
+downscaled a lot (e.g. a 4K capture into a small canvas), so fine detail like text
+filters cleanly instead of aliasing."
   (let ((tex (gl:gen-texture)))
     (gl:bind-texture :texture-2d tex)
-    (gl:tex-parameter :texture-2d :texture-min-filter filter)
-    (gl:tex-parameter :texture-2d :texture-mag-filter filter)
+    (gl:tex-parameter :texture-2d :texture-min-filter
+                      (if mipmap :linear-mipmap-linear filter))
+    (gl:tex-parameter :texture-2d :texture-mag-filter (if mipmap :linear filter))
     (gl:tex-parameter :texture-2d :texture-wrap-s :clamp-to-edge)
     (gl:tex-parameter :texture-2d :texture-wrap-t :clamp-to-edge)
     (cffi:with-pointer-to-vector-data (ptr bytes)
       (gl:tex-image-2d :texture-2d 0 :rgba w h 0 source-format :unsigned-byte ptr))
+    (when mipmap (gl:generate-mipmap :texture-2d))
     tex))
 
-(defun update-texture-rgba (tex bytes w h &key (source-format :rgba))
+(defun update-texture-rgba (tex bytes w h &key (source-format :rgba) (mipmap nil))
   "Replace TEX's pixels in place (glTexSubImage2D) -- for a per-frame video source
-where re-uploading a whole new texture each frame would churn allocations."
+where re-uploading a whole new texture each frame would churn allocations. MIPMAP
+t rebuilds the mip chain after the upload (needed each frame for trilinear
+minification to stay correct)."
   (gl:bind-texture :texture-2d tex)
   (cffi:with-pointer-to-vector-data (ptr bytes)
     (gl:tex-sub-image-2d :texture-2d 0 0 0 w h source-format :unsigned-byte ptr))
+  (when mipmap (gl:generate-mipmap :texture-2d))
   tex)
 
 (defun rgba->bgrx (rgba)
@@ -868,7 +877,8 @@ and updated each frame."
                           (make-program +vs-passthrough+ +fs-cursor-image+)))
              (vao      (make-fullscreen-quad))
              (tex      (make-texture-rgba (funcall frame-fn 0) source-width source-height
-                                          :source-format source-format :filter :linear))
+                                          :source-format source-format :filter :linear
+                                          :mipmap t))   ; trilinear: clean downscales
              (cur-tex  (when cursor-image
                          (make-texture-rgba (first cursor-image)
                                             (second cursor-image) (third cursor-image)
@@ -888,7 +898,7 @@ and updated each frame."
                (dotimes (i n-frames)
                  (when (> i 0)
                    (update-texture-rgba tex (funcall frame-fn i) source-width source-height
-                                        :source-format source-format))
+                                        :source-format source-format :mipmap t))
                  (let* ((tsec  (if time-fn (funcall time-fn i) (/ i (float fps 1.0))))
                         (frame (kf:sample-timeline keyframes tsec)))
                    (gl:clear-color 0.0 0.0 0.0 1.0)
