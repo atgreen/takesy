@@ -95,7 +95,11 @@ jobs:
           path: .
 
       - name: Install build dependencies
-        run: dnf install -y rpm-build rpmdevtools rpm-sign sbcl gcc make libfixposix-devel
+        run: |
+          dnf install -y rpm-build rpmdevtools rpm-sign sbcl gcc make libfixposix-devel
+          # Runtime libs the image loads (use-foreign-library) while asdf:make
+          # dumps it -- must be present at build time, not just on the user's box.
+          dnf install -y pipewire-libs mesa-libEGL mesa-libGL
 
       - name: Setup rpmbuild tree
         run: rpmdev-setuptree
@@ -180,6 +184,9 @@ jobs:
         run: |
           apt-get update
           apt-get install -y debhelper devscripts sbcl gcc make libfixposix-dev gpg debsigs
+          # Runtime libs the image loads (use-foreign-library) while asdf:make
+          # dumps it -- must be present at build time, not just on the user's box.
+          apt-get install -y libpipewire-0.3-0 libegl1 libgl1
 
       - name: Set changelog version
         run: |
