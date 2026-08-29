@@ -850,6 +850,53 @@ image) placed at framebuffer (PX,PY), sized W x H px, clipped to the content rec
   (gl:draw-arrays :triangle-strip 0 4)
   (gl:disable :blend))
 
+(defparameter +fs-ripple+
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform vec2  u_canvas;
+uniform vec2  u_center;     // ripple centre, framebuffer px
+uniform float u_radius;     // current ring radius, px
+uniform float u_thickness;  // ring thickness, px
+uniform float u_alpha;      // peak opacity 0..1
+uniform vec3  u_color;
+uniform float u_padding;
+uniform float u_corner;
+
+float sd_round_box(vec2 p, vec2 b, float r) {
+  vec2 q=abs(p)-b+vec2(r); return min(max(q.x,q.y),0.0)+length(max(q,0.0))-r;
+}
+void main() {
+  vec2 P = v_uv * u_canvas;
+  vec2 pad = u_padding * u_canvas;
+  vec2 lo=pad, hi=u_canvas-pad, sz=hi-lo, ctr=0.5*(lo+hi);
+  if (sd_round_box(P-ctr, 0.5*sz, u_corner*min(sz.x,sz.y)) > 0.0) discard;  // clip to content
+  float d    = length(P - u_center);
+  float band = 1.0 - smoothstep(0.0, u_thickness, abs(d - u_radius));       // ring falloff
+  float a    = band * u_alpha;
+  if (a <= 0.003) discard;
+  frag = vec4(u_color, a);
+}")
+
+(defun draw-ripple (program vao px py radius thickness alpha color keyframe out-w out-h)
+  "Draw one click ripple ring centred at framebuffer (PX,PY), clipped to content."
+  (gl:use-program program)
+  (flet ((uni (n) (gl:get-uniform-location program n)))
+    (let ((l (uni "u_canvas")))    (when (>= l 0) (gl:uniformf l (float out-w 1.0) (float out-h 1.0))))
+    (let ((l (uni "u_center")))    (when (>= l 0) (gl:uniformf l (float px 1.0) (float py 1.0))))
+    (let ((l (uni "u_radius")))    (when (>= l 0) (gl:uniformf l (float radius 1.0))))
+    (let ((l (uni "u_thickness"))) (when (>= l 0) (gl:uniformf l (float thickness 1.0))))
+    (let ((l (uni "u_alpha")))     (when (>= l 0) (gl:uniformf l (float alpha 1.0))))
+    (let ((l (uni "u_color")))     (when (>= l 0) (destructuring-bind (r g b) color
+                                                    (gl:uniformf l (float r 1.0) (float g 1.0) (float b 1.0)))))
+    (let ((l (uni "u_padding")))   (when (>= l 0) (gl:uniformf l (float (kf:keyframe-padding keyframe) 1.0))))
+    (let ((l (uni "u_corner")))    (when (>= l 0) (gl:uniformf l (float (kf:keyframe-corner-radius keyframe) 1.0)))))
+  (gl:enable :blend)
+  (gl:blend-func :src-alpha :one-minus-src-alpha)
+  (gl:bind-vertex-array vao)
+  (gl:draw-arrays :triangle-strip 0 4)
+  (gl:disable :blend))
+
 (defun render-frame-sequence (keyframes frame-fn n-frames out-w out-h
                               &key (fps 30) (source-format :rgba)
                                    (source-width out-w) (source-height out-h)
@@ -857,6 +904,7 @@ image) placed at framebuffer (PX,PY), sized W x H px, clipped to the content rec
                                    (cursor-image nil) (cursor-hotspot '(0.0 . 0.0))
                                    (cursor-size nil)
                                    (bg-image nil) (bg-blur nil)
+                                   (clicks nil) (ripple-color '(1.0 1.0 1.0))
                                    (audio nil)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
@@ -882,6 +930,12 @@ and updated each frame."
                           (make-program +vs-passthrough+ +fs-cursor+)))
              (img-prog  (when (and cursor-fn cursor-image)
                           (make-program +vs-passthrough+ +fs-cursor-image+)))
+             (ripple-prog (when (and cursor-fn clicks)
+                            (make-program +vs-passthrough+ +fs-ripple+)))
+             (rip-dur   0.5)                    ; ripple lifetime, seconds
+             (rip-max-r (* out-h 0.07))         ; peak ring radius, px
+             (rip-thick (* out-h 0.010))        ; ring thickness, px
+             (press-dur 0.12)                   ; cursor press-scale window, s
              (vao      (make-fullscreen-quad))
              (tex      (make-texture-rgba (funcall frame-fn 0) source-width source-height
                                           :source-format source-format :filter :linear
@@ -912,17 +966,38 @@ and updated each frame."
                    (gl:clear :color-buffer-bit)
                    (draw-compose program vao tex frame out-w out-h crop
                                  :bg-tex bg-tex :bg-size bg-size :bg-blur bg-blur)
+                   ;; Click ripples (under the cursor): an expanding, fading ring
+                   ;; at each recent click, placed via the cursor track at click time.
+                   (when ripple-prog
+                     (dolist (ct clicks)
+                       (let ((age (- tsec ct)))
+                         (when (<= 0.0 age rip-dur)
+                           (let* ((prog (/ age rip-dur))
+                                  (ci   (max 0 (min (1- n-frames) (round (* ct fps)))))
+                                  (cuv  (funcall cursor-fn ci)))
+                             (when cuv
+                               (multiple-value-bind (px py vis)
+                                   (cursor-output-px cuv frame out-w out-h)
+                                 (when vis
+                                   (draw-ripple ripple-prog vao px py
+                                                (* prog rip-max-r) rip-thick
+                                                (* (- 1.0 prog) 0.55) ripple-color
+                                                frame out-w out-h)))))))))
                    (when cursor-fn
-                     (let ((cuv (funcall cursor-fn i)))
+                     (let ((cuv (funcall cursor-fn i))
+                           ;; press feedback: briefly scale the cursor down on a click
+                           (press (if (and clicks
+                                           (some (lambda (ct) (<= 0.0 (- tsec ct) press-dur)) clicks))
+                                      0.72 1.0)))
                        (when cuv
                          (multiple-value-bind (px py vis)
                              (cursor-output-px cuv frame out-w out-h)
                            (when vis
                              (if img-prog
                                  (draw-cursor-image img-prog vao cur-tex px py
-                                                    img-w img-h cursor-hotspot
+                                                    (* img-w press) (* img-h press) cursor-hotspot
                                                     frame out-w out-h)
-                                 (draw-cursor curs-prog vao px py cur-size frame out-w out-h)))))))
+                                 (draw-cursor curs-prog vao px py (* cur-size press) frame out-w out-h)))))))
                    (gl:finish)
                    ;; stream this frame straight to ffmpeg -- no raw dump on disk
                    (%write-frame enc (read-rgba out-w out-h))))

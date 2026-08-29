@@ -18,7 +18,8 @@
   (:use #:cl)
   (:local-nicknames (#:dir #:takesy/director))
   (:export #:events-from-octets #:read-evdev-events
-           #:probe-readable-input-devices #:+input-event-size+))
+           #:probe-readable-input-devices #:+input-event-size+
+           #:capture-click-times))
 
 (in-package #:takesy/evdev)
 
@@ -72,6 +73,54 @@ are seconds relative to BASE, or to the first press if BASE is nil."
    (lambda (p) (ignore-errors
                 (with-open-file (s p :element-type '(unsigned-byte 8)) (declare (ignore s)) t)))
    (directory #p"/dev/input/event*")))
+
+(defun %wall-clock-now ()
+  "Current wall-clock time in seconds (matches evdev's tv_sec.tv_usec base)."
+  (multiple-value-bind (ok sec usec) (sb-unix:unix-gettimeofday)
+    (declare (ignore ok))
+    (+ sec (/ usec 1000000.0d0))))
+
+(defun capture-click-times (stop-fn &key (base (%wall-clock-now)))
+  "Spawn a background thread that polls every readable mouse device until
+(FUNCALL STOP-FN) is true, then returns a sorted list of CLICK press times in
+seconds relative to BASE (default: wall clock at the call). Returns a thunk that,
+when called, joins the thread and yields the click-time list. Best-effort: no
+readable device (not in the `input' group) -> the thunk returns NIL.
+
+Usage: (let ((join (capture-click-times (lambda () *done*)))) ... (funcall join))."
+  (let* ((devs (probe-readable-input-devices))
+         (times (make-array 0 :adjustable t :fill-pointer 0))
+         (lock  (sb-thread:make-mutex))
+         (thread
+           (when devs
+             (sb-thread:make-thread
+              (lambda ()
+                (handler-case
+                    (let ((streams (mapcar (lambda (p)
+                                             (open p :element-type '(unsigned-byte 8)
+                                                     :direction :input))
+                                           devs))
+                          (rec (make-array +input-event-size+ :element-type '(unsigned-byte 8))))
+                      (unwind-protect
+                           (loop until (funcall stop-fn) do
+                             (let ((any nil))
+                               (dolist (s streams)
+                                 (when (listen s)
+                                   (when (= +input-event-size+ (read-sequence rec s))
+                                     (setf any t)
+                                     (dolist (ev (events-from-octets rec :base base))
+                                       (when (eq (dir:input-event-kind ev) :click)
+                                         (sb-thread:with-mutex (lock)
+                                           (vector-push-extend (dir:input-event-time ev) times)))))))
+                               (unless any (sleep 0.005))))
+                        (dolist (s streams) (ignore-errors (close s)))))
+                  (error (e)
+                    (format *error-output* "  [evdev] click capture stopped (~A)~%" e))))
+              :name "takesy-evdev-clicks"))))
+    (lambda ()
+      (when thread (ignore-errors (sb-thread:join-thread thread)))
+      (sb-thread:with-mutex (lock)
+        (sort (coerce times 'list) #'<)))))
 
 (defun read-evdev-events (path duration)
   "Best-effort: poll device PATH for DURATION seconds and return the press events

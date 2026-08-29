@@ -70,7 +70,7 @@
 (asdf:defsystem "takesy/record"
   :description "Record orchestration: portal capture -> Director -> compositor -> mp4."
   :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor"
-               "takesy/audio")
+               "takesy/audio" "takesy/evdev")
   :serial t
   :components ((:module "src"
                 :components ((:file "record")))))

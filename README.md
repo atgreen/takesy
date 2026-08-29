@@ -24,6 +24,7 @@ into a finished mp4. You just record; takesy directs the shot.
 - **Polished compositing** — the screen inset on a padded background with rounded
   corners (optional) and a soft drop shadow.
 - **Custom cursor** — draw your own cursor image instead of the built-in arrow.
+- **Click ripples** — expanding rings on click, with a subtle cursor press animation.
 - **Audio** — optionally record desktop sound, your mic, or both, muxed into the mp4.
 - **Capture once, render many** — record once, then re-render with different
   framing, background, or cursor without re-recording.

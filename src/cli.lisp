@@ -134,6 +134,7 @@ options:
   --cursor-size F   cursor height as a fraction of output height (default 0.06)
   --audio  MODE     record audio (capture/record): system (desktop), mic, or both
                     (default: off). Muxed into the mp4; survives capture->render.
+  --ripples on|off  click ripples + cursor press animation (default on)
 
 direction tuning (auto-zoom + cursor feel):
   --zoom   F              punch-in zoom factor for activity     (default 1.8)
@@ -162,6 +163,9 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :bg                (if (and bg-str (not bg-blur))
                                  (parse-color bg-str) '(0.11 0.12 0.15))
           :bg-image          (opt o "bg-image" nil)
+          :ripples           (let ((v (opt o "ripples" nil)))
+                               (not (and v (member (string-downcase (string-trim " " v))
+                                                   '("off" "no" "false" "0") :test #'string=))))
           :aspect            (parse-aspect (opt o "aspect" nil))
           :corner            (opt-num o "corner-radius" 0.09)
           :cursor            (opt o "cursor" nil)

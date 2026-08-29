@@ -10,7 +10,8 @@
 (defpackage #:takesy/record
   (:use #:cl)
   (:local-nicknames (#:portal #:takesy/portal) (#:pw #:takesy/pipewire)
-                    (#:dir #:takesy/director) (#:comp #:takesy/compositor))
+                    (#:dir #:takesy/director) (#:comp #:takesy/compositor)
+                    (#:evdev #:takesy/evdev))
   (:export #:recording->session #:compute-damage #:compute-content-bbox
            #:compose-recording #:record-to-mp4 #:load-image-rgba
            #:capture-recording #:render-recording #:render-recording-dir))
@@ -251,6 +252,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (cursor-size nil)
                                             (bg-image nil)
                                             (bg-blur nil)
+                                            (clicks nil) (ripple-color '(1.0 1.0 1.0))
                                             (audio nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
@@ -303,27 +305,51 @@ without an over-large file."
                   :cursor-image cursor-image :cursor-hotspot cursor-hotspot
                   :cursor-size cursor-size
                   :bg-image bg-image :bg-blur bg-blur
+                  :clicks clicks :ripple-color ripple-color
                   :audio audio
                   :crop crop
                   :path out))
             (%close-decoder dec)))))))
 
+(defun %persist-manifest (rec dir)
+  "Re-write DIR/manifest.sexp from REC (after splicing in fields RECORD-FRAMES
+didn't know at write time, e.g. :click-times)."
+  (with-open-file (s (format nil "~A/manifest.sexp" (string-right-trim "/" dir))
+                     :direction :output :if-exists :supersede :if-does-not-exist :create)
+    (with-standard-io-syntax (prin1 rec s))))
+
 (defun capture-recording (&key (duration 30.0) (fps 24) (dir "/tmp/takesy-rec")
-                               (audio nil))
+                               (audio nil) (capture-clicks t))
   "Capture stage only: pop the screen-share dialog and record until you end the
 share -- click GNOME's Stop button in the top bar -- or DURATION seconds elapse as
 a safety cap. Frames (and the compressed intermediate) are written under DIR, and
 RECORD-FRAMES persists a manifest.sexp there so the recording is self-contained and
 can be re-rendered later with LOAD-RECORDING + RENDER-RECORDING. FPS only sets the
 capture throttle (a bit above the output rate). AUDIO (:system | :mic | :both)
-records a parallel audio track stored in the manifest. Return the recording plist."
+records a parallel audio track stored in the manifest. When CAPTURE-CLICKS, a
+background thread records mouse-click times (evdev, best-effort -- needs the
+`input' group) into :click-times for the render's click ripples. Return the
+recording plist."
   (portal:with-screencast (fd node :cursor-mode portal:+cursor-metadata+)
     (format t "  [capture] recording... click the Stop button in the GNOME top bar ~
                  to finish (or ~,0Fs max).~%" duration)
     ;; Capture throttle a bit above the output rate so we keep enough source
     ;; frames; the real limit is the compositor's on-change delivery.
-    (pw:record-frames fd node :duration duration :max-fps (max fps 30) :dir dir
-                              :audio audio)))
+    (let* ((done nil)
+           ;; evdev click capture runs alongside the frame capture; base ~ capture
+           ;; start so click times align with the frame timeline.
+           (join (when capture-clicks
+                   (ignore-errors (evdev:capture-click-times (lambda () done)))))
+           (rec  (pw:record-frames fd node :duration duration :max-fps (max fps 30)
+                                   :dir dir :audio audio)))
+      (setf done t)
+      (when join
+        (let ((cts (ignore-errors (funcall join))))
+          (when cts
+            (setf (getf rec :click-times) cts)
+            (%persist-manifest rec dir)
+            (format t "  [capture] recorded ~D click(s) for ripples~%" (length cts)))))
+      rec)))
 
 (defun render-recording (rec &key (fps 24) (max-height 1200)
                                   (bg '(0.11 0.12 0.15))
@@ -333,6 +359,7 @@ records a parallel audio track stored in the manifest. Return the recording plis
                                   (cursor-size nil)
                                   (bg-image nil)
                                   (bg-blur nil)
+                                  (ripples t)
                                   (aspect nil)
                                   (zoom dir:*zoom-level*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -386,6 +413,7 @@ different config. Return (values out n-frames)."
                          :cursor-image cursor-image
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
                          :bg-image bg-image-data :bg-blur bg-blur
+                         :clicks (when ripples (getf rec :click-times))
                          ;; audio was captured alongside the frames; mux it back in
                          :audio (getf rec :audio)))))
 
@@ -403,6 +431,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (cursor-size nil)
                            (bg-image nil)
                            (bg-blur nil)
+                           (ripples t)
                            (aspect nil)
                            (audio nil)
                            (zoom dir:*zoom-level*)
@@ -418,7 +447,7 @@ re-rendered. Return (values out n-frames)."
   (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio)))
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
                           :cursor cursor :cursor-hotspot cursor-hotspot
-                          :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur
+                          :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
                           :aspect aspect
                           :zoom zoom :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
