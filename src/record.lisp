@@ -344,6 +344,13 @@ recording plist."
                  to finish (or ~,0Fs max).~%" duration)
     ;; Capture throttle a bit above the output rate so we keep enough source
     ;; frames; the real limit is the compositor's on-change delivery.
+    ;; Warn up front when we can't read input devices -- otherwise ripples just
+    ;; silently don't appear (clicks need the `input' group).
+    (when (and capture-clicks (not (evdev:probe-readable-input-devices)))
+      (format t "  [capture] note: no readable input device -- click ripples need~%~
+                   read access to /dev/input. Add yourself to the 'input' group:~%~
+                   sudo usermod -aG input $USER  (then log out/in). Recording~%~
+                   without click data for now.~%"))
     (let* ((done nil)
            ;; evdev click capture runs alongside the frame capture; base ~ capture
            ;; start so click times align with the frame timeline.
