@@ -26,6 +26,7 @@ into a finished mp4. You just record; takesy directs the shot.
 - **Custom cursor** — draw your own cursor image instead of the built-in arrow.
 - **Click ripples** — expanding rings on click, with a subtle cursor press animation.
 - **Trim idle time** — cut dead stretches (no screen change) to tighten long demos.
+- **Webcam inset** — composite a webcam clip as a circle-cropped picture-in-picture.
 - **Audio** — optionally record desktop sound, your mic, or both, muxed into the mp4.
 - **Capture once, render many** — record once, then re-render with different
   framing, background, or cursor without re-recording.
@@ -124,6 +125,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--aspect W:H` | reframe the output to an aspect (e.g. `9:16` vertical, `1:1` square), keeping the active region centered | content aspect |
 | `--region X,Y,W,H` | frame a fixed screen region (source pixels) instead of auto-cropping to content | auto-crop |
 | `--trim-idle on` | cut idle stretches (no screen change) longer than `--idle-threshold` down to `--max-idle` seconds; tightens long demos (drops audio for now) | off |
+| `--webcam PATH` | composite a webcam video/image as a circle inset (`--webcam-pos br\|bl\|tr\|tl`, `--webcam-size` fraction of height) | — |
 | `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
 | `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
 | `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |

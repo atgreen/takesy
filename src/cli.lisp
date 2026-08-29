@@ -112,6 +112,17 @@ integers, or NIL when absent."
           (error "bad --region ~S (W and H must be non-negative)" str))
         parts)))
 
+(defun parse-webcam-pos (str)
+  "Parse --webcam-pos into a corner keyword: br/bl/tr/tl (default :br)."
+  (if (null str)
+      :br
+      (let ((s (string-downcase (string-trim " " str))))
+        (cond ((member s '("br" "bottom-right") :test #'string=) :br)
+              ((member s '("bl" "bottom-left")  :test #'string=) :bl)
+              ((member s '("tr" "top-right")    :test #'string=) :tr)
+              ((member s '("tl" "top-left")     :test #'string=) :tl)
+              (t (error "bad --webcam-pos ~S (use br, bl, tr, tl)" str))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Subcommands.
 
@@ -150,6 +161,9 @@ options:
   --audio  MODE     record audio (capture/record): system (desktop), mic, or both
                     (default: off). Muxed into the mp4; survives capture->render.
   --ripples on|off  click ripples + cursor press animation (default on)
+  --webcam PATH     composite a webcam video/image as a circle inset
+  --webcam-pos POS  inset corner: br|bl|tr|tl (default br)
+  --webcam-size F   inset diameter as a fraction of output height (default 0.22)
   --trim-idle on    cut idle stretches (no screen change) to speed up demos;
                     --idle-threshold S (gap to cut, default 1.2), --max-idle S
                     (kept per gap, default 0.4). Drops audio for now.
@@ -181,6 +195,9 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :bg                (if (and bg-str (not bg-blur))
                                  (parse-color bg-str) '(0.11 0.12 0.15))
           :bg-image          (opt o "bg-image" nil)
+          :webcam            (opt o "webcam" nil)
+          :webcam-pos        (parse-webcam-pos (opt o "webcam-pos" nil))
+          :webcam-size       (opt-num o "webcam-size" 0.22)
           :ripples           (let ((v (opt o "ripples" nil)))
                                (not (and v (member (string-downcase (string-trim " " v))
                                                    '("off" "no" "false" "0") :test #'string=))))

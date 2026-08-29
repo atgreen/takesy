@@ -59,9 +59,30 @@ rawvideo RGBA. Signals if the file is missing or the byte count doesn't match."
 
 (defstruct decoder proc stream fifo nbytes (idx -1) buf)
 
-(defun %open-decoder (intermediate w h)
-  "Launch ffmpeg decoding INTERMEDIATE to a FIFO of rawvideo BGRx frames; return a
-DECODER. The read end is opened after launch so ffmpeg's blocking FIFO-write open
+(defun %probe-video (path)
+  "Return (values width height fps) for video PATH via ffprobe."
+  (let* ((out (uiop:run-program
+               (list "ffprobe" "-v" "error" "-select_streams" "v:0"
+                     "-show_entries" "stream=width,height,avg_frame_rate"
+                     "-of" "csv=p=0:s=," path)
+               :output '(:string :stripped t)))
+         (parts (loop with start = 0
+                      for pos = (position #\, out :start start)
+                      collect (subseq out start pos)
+                      while pos do (setf start (1+ pos))))
+         (w (parse-integer (first parts)))
+         (h (parse-integer (second parts)))
+         (rate (third parts))               ; "num/den"
+         (slash (position #\/ rate))
+         (fps (if slash
+                  (/ (parse-integer rate :end slash)
+                     (max 1 (parse-integer rate :start (1+ slash))))
+                  (parse-integer rate))))
+    (values w h (float fps 1.0))))
+
+(defun %open-decoder (intermediate w h &optional (pix-fmt "bgra"))
+  "Launch ffmpeg decoding INTERMEDIATE to a FIFO of rawvideo PIX-FMT frames; return
+a DECODER. The read end is opened after launch so ffmpeg's blocking FIFO-write open
 unblocks."
   (let* ((fifo (format nil "~A.dec.fifo" intermediate))
          (nbytes (* w h 4)))
@@ -69,7 +90,7 @@ unblocks."
     (uiop:run-program (list "mkfifo" fifo))
     (let ((proc (uiop:launch-program
                  (list "ffmpeg" "-y" "-loglevel" "error" "-i" intermediate
-                       "-f" "rawvideo" "-pix_fmt" "bgra" fifo)
+                       "-f" "rawvideo" "-pix_fmt" pix-fmt fifo)
                  :output nil :error-output nil)))
       (make-decoder :proc proc
                     :stream (open fifo :direction :input :element-type '(unsigned-byte 8))
@@ -309,6 +330,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (bg-image nil)
                                             (bg-blur nil)
                                             (clicks nil) (ripple-color '(1.0 1.0 1.0))
+                                            (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                                             (audio nil)
                                             (time-warp nil) (out-duration nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
@@ -345,32 +367,44 @@ without an over-large file."
                 nsrc nout dur fps (- cx1 cx0) (- cy1 cy0) ow oh cursor-fn)
         ;; source frames come from the compressed intermediate (decoded forward)
         ;; when present, else per-frame raw files.
-        (let ((dec (when (getf rec :intermediate)
-                     (%open-decoder (getf rec :intermediate) fw fh))))
-          (unwind-protect
-               (flet ((src (i)   ; nearest source frame for output frame i (warped)
-                        (let ((idx (%nearest-frame-index frames (funcall src-time i))))
-                          (if dec
-                              (%decoder-frame dec idx)
-                              (progn
-                                (unless (= idx cache-idx)
-                                  (setf cache-idx idx
-                                        cache-bytes (%read-file-bytes (getf (aref frames idx) :path))))
-                                cache-bytes)))))
-                 (comp:render-frame-sequence
-                  timeline #'src nout ow oh
-                  :fps fps :source-format :bgra
-                  :source-width fw :source-height fh
-                  :time-fn src-time
-                  :cursor-fn cursor-fn
-                  :cursor-image cursor-image :cursor-hotspot cursor-hotspot
-                  :cursor-size cursor-size
-                  :bg-image bg-image :bg-blur bg-blur
-                  :clicks clicks :ripple-color ripple-color
-                  :audio audio
-                  :crop crop
-                  :path out))
-            (%close-decoder dec)))))))
+        ;; Optional webcam PiP: decode WEBCAM forward, mapping output time to the
+        ;; webcam's own timeline (holds last frame past its end).
+        (multiple-value-bind (ww wh wfps)
+            (if webcam (%probe-video webcam) (values nil nil nil))
+          (let ((dec (when (getf rec :intermediate)
+                       (%open-decoder (getf rec :intermediate) fw fh)))
+                (wc-dec (when webcam (%open-decoder webcam ww wh "rgba"))))
+            (unwind-protect
+                 (let ((webcam-fn (when webcam
+                                    ;; webcam frame at output time i (its own fps)
+                                    (lambda (i)
+                                      (%decoder-frame wc-dec (floor (* (/ i (float fps 1.0)) wfps)))))))
+                  (flet ((src (i)   ; nearest source frame for output frame i (warped)
+                          (let ((idx (%nearest-frame-index frames (funcall src-time i))))
+                            (if dec
+                                (%decoder-frame dec idx)
+                                (progn
+                                  (unless (= idx cache-idx)
+                                    (setf cache-idx idx
+                                          cache-bytes (%read-file-bytes (getf (aref frames idx) :path))))
+                                  cache-bytes)))))
+                   (comp:render-frame-sequence
+                    timeline #'src nout ow oh
+                    :fps fps :source-format :bgra
+                    :source-width fw :source-height fh
+                    :time-fn src-time
+                    :cursor-fn cursor-fn
+                    :cursor-image cursor-image :cursor-hotspot cursor-hotspot
+                    :cursor-size cursor-size
+                    :bg-image bg-image :bg-blur bg-blur
+                    :clicks clicks :ripple-color ripple-color
+                    :webcam-fn webcam-fn :webcam-dims (when webcam (cons ww wh))
+                    :webcam-pos webcam-pos :webcam-size webcam-size
+                    :audio audio
+                    :crop crop
+                    :path out)))
+              (%close-decoder dec)
+              (%close-decoder wc-dec))))))))
 
 (defun %persist-manifest (rec dir)
   "Re-write DIR/manifest.sexp from REC (after splicing in fields RECORD-FRAMES
@@ -431,6 +465,7 @@ recording plist."
                                   (aspect nil)
                                   (region nil)
                                   (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
+                                  (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                                   (zoom dir:*zoom-level*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -495,6 +530,7 @@ different config. Return (values out n-frames)."
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
                          :bg-image bg-image-data :bg-blur bg-blur
                          :clicks (when ripples (getf rec :click-times))
+                         :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
                          :time-warp (first warp-info) :out-duration (second warp-info)
                          ;; audio was captured alongside the frames; mux it back in.
                          ;; Idle-trim would desync it -> drop it (synced trim is TODO).
@@ -523,6 +559,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (aspect nil)
                            (region nil)
                            (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
+                           (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -540,6 +577,7 @@ re-rendered. Return (values out n-frames)."
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
                           :aspect aspect :region region
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
+                          :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
                           :zoom zoom :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate

@@ -897,6 +897,52 @@ void main() {
   (gl:draw-arrays :triangle-strip 0 4)
   (gl:disable :blend))
 
+(defparameter +fs-webcam+
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_tex;
+uniform vec2  u_canvas;
+uniform vec2  u_center;   // inset centre, framebuffer px
+uniform float u_radius;   // inset radius, px
+uniform float u_aspect;   // webcam width/height (for cover-fit into the circle)
+uniform vec3  u_border;
+
+void main() {
+  vec2 P = v_uv * u_canvas;
+  float d = length(P - u_center);
+  if (d > u_radius) discard;                           // outside the circle
+  // cover-fit the webcam into the circle (centre-crop the wider axis)
+  vec2 uv = (P - u_center) / (2.0 * u_radius) + vec2(0.5);
+  if (u_aspect > 1.0) uv.x = (uv.x - 0.5) / u_aspect + 0.5;   // wide: crop sides
+  else                uv.y = (uv.y - 0.5) * u_aspect + 0.5;   // tall: crop top/bottom
+  vec3 col = texture(u_tex, uv).rgb;
+  // soft white ring border on the outer edge
+  float edge = smoothstep(u_radius - 2.0, u_radius, d);
+  col = mix(col, u_border, edge);
+  frag = vec4(col, 1.0);
+}")
+
+(defun draw-webcam (program vao tex cx cy radius aspect border out-w out-h)
+  "Draw a circle-cropped webcam inset (texture TEX, cover-fit) centred at
+framebuffer (CX,CY) with RADIUS px and a soft border."
+  (gl:use-program program)
+  (gl:active-texture :texture0)
+  (gl:bind-texture :texture-2d tex)
+  (flet ((uni (n) (gl:get-uniform-location program n)))
+    (let ((l (uni "u_tex")))    (when (>= l 0) (gl:uniformi l 0)))
+    (let ((l (uni "u_canvas"))) (when (>= l 0) (gl:uniformf l (float out-w 1.0) (float out-h 1.0))))
+    (let ((l (uni "u_center"))) (when (>= l 0) (gl:uniformf l (float cx 1.0) (float cy 1.0))))
+    (let ((l (uni "u_radius"))) (when (>= l 0) (gl:uniformf l (float radius 1.0))))
+    (let ((l (uni "u_aspect"))) (when (>= l 0) (gl:uniformf l (float aspect 1.0))))
+    (let ((l (uni "u_border"))) (when (>= l 0) (destructuring-bind (r g b) border
+                                                 (gl:uniformf l (float r 1.0) (float g 1.0) (float b 1.0))))))
+  (gl:enable :blend)
+  (gl:blend-func :src-alpha :one-minus-src-alpha)
+  (gl:bind-vertex-array vao)
+  (gl:draw-arrays :triangle-strip 0 4)
+  (gl:disable :blend))
+
 (defun render-frame-sequence (keyframes frame-fn n-frames out-w out-h
                               &key (fps 30) (source-format :rgba)
                                    (source-width out-w) (source-height out-h)
@@ -905,6 +951,8 @@ void main() {
                                    (cursor-size nil)
                                    (bg-image nil) (bg-blur nil)
                                    (clicks nil) (ripple-color '(1.0 1.0 1.0))
+                                   (webcam-fn nil) (webcam-dims nil)
+                                   (webcam-pos :br) (webcam-size 0.22)
                                    (audio nil)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
@@ -932,6 +980,21 @@ and updated each frame."
                           (make-program +vs-passthrough+ +fs-cursor-image+)))
              (ripple-prog (when (and cursor-fn clicks)
                             (make-program +vs-passthrough+ +fs-ripple+)))
+             (wc-prog   (when webcam-fn (make-program +vs-passthrough+ +fs-webcam+)))
+             (wc-tex    (when webcam-fn
+                          (make-texture-rgba (funcall webcam-fn 0)
+                                             (car webcam-dims) (cdr webcam-dims)
+                                             :source-format :rgba :filter :linear)))
+             (wc-aspect (when webcam-dims (/ (float (car webcam-dims) 1.0)
+                                             (float (cdr webcam-dims) 1.0))))
+             (wc-radius (* 0.5 out-h webcam-size))
+             (wc-margin (* out-h 0.035))
+             (wc-cx (ecase webcam-pos
+                      ((:br :tr) (- out-w wc-margin wc-radius))
+                      ((:bl :tl) (+ wc-margin wc-radius))))
+             (wc-cy (ecase webcam-pos
+                      ((:br :bl) (- out-h wc-margin wc-radius))
+                      ((:tr :tl) (+ wc-margin wc-radius))))
              (rip-dur   0.5)                    ; ripple lifetime, seconds
              (rip-max-r (* out-h 0.07))         ; peak ring radius, px
              (rip-thick (* out-h 0.010))        ; ring thickness, px
@@ -998,6 +1061,14 @@ and updated each frame."
                                                     (* img-w press) (* img-h press) cursor-hotspot
                                                     frame out-w out-h)
                                  (draw-cursor curs-prog vao px py (* cur-size press) frame out-w out-h)))))))
+                   ;; Webcam picture-in-picture: circle-cropped inset on top.
+                   (when wc-prog
+                     (when (> i 0)
+                       (update-texture-rgba wc-tex (funcall webcam-fn i)
+                                            (car webcam-dims) (cdr webcam-dims)
+                                            :source-format :rgba))
+                     (draw-webcam wc-prog vao wc-tex wc-cx wc-cy wc-radius
+                                  wc-aspect '(1.0 1.0 1.0) out-w out-h))
                    (gl:finish)
                    ;; stream this frame straight to ffmpeg -- no raw dump on disk
                    (%write-frame enc (read-rgba out-w out-h))))
