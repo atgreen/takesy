@@ -10,7 +10,7 @@ and composites the result â€” padded background, rounded corners, drop shadow â€
 an mp4. No timeline, no manual keyframing; just record, and takesy directs the
 shot for you.
 
-<!-- Demo: drop a clip here, e.g. ![takesy demo](docs/demo.gif) -->
+<p align="center"><img src="docs/demo.gif" alt="takesy recording demo" width="720"></p>
 
 ## Features
 
