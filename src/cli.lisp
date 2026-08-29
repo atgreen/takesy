@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 ;;;; SPDX-License-Identifier: MIT
 ;;;; cli.lisp
 ;;;;
@@ -62,52 +62,138 @@ gray, dark, navy, slate, ...). Return (r g b) in 0..1."
            (flet ((h (a b) (/ (parse-integer s :start a :end b :radix 16) 255.0)))
              (list (h 0 2) (h 2 4) (h 4 6))))))))
 
+(defun parse-xy (str)
+  "Parse `X,Y` (two reals) into a (cons x . y). Used for --cursor-hotspot."
+  (let ((c (position #\, str)))
+    (unless c (error "expected X,Y (comma-separated), got ~S" str))
+    (flet ((num (s) (let ((*read-eval* nil))
+                      (let ((n (read-from-string s)))
+                        (unless (realp n) (error "~S is not a number" s))
+                        (float n 1.0)))))
+      (cons (num (subseq str 0 c)) (num (subseq str (1+ c)))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Subcommands.
 
 (defparameter +usage+
-  "takesy -- screen recorder for modern Linux desktops, Wayland & X11 (Common Lisp)
+  "takesy -- screen recorder for modern Linux desktops, Wayland & X11
 
 Usage:
   takesy [options]           Capture your screen -> auto-zoom -> mp4.
+  takesy capture [options]   Capture only; save to a dir for later rendering.
+  takesy render DIR [options]  Render a captured dir -> mp4 (re-run with any tuning).
   takesy help                Show this help.
+
+Capture once, render many: `takesy capture` writes a self-contained recording dir
+(frames + manifest); `takesy render DIR` runs the auto-zoom/composite over it, so
+you can try different --bg / --zoom / cursor tuning without re-recording.
 
 options:
   --output PATH    output mp4            (default /tmp/takesy-record.mp4)
-  --duration S     max seconds (safety)  (default 30)
+  --dir    PATH    recording dir         (default /tmp/takesy-rec; capture/record)
+  --duration S     max seconds (safety)  (default 30; capture/record)
   --fps    N       output frames/sec     (default 24; static stretches hold)
   --height N        max output height, px (default 1200; never upscales)
   --bg     COLOR    background: #RRGGBB or a name (black/white/dark/navy/...)
+  --corner-radius F rounded-corner radius, fraction of content (default 0.09;
+                    0 = square corners)
+  --cursor PATH     draw a custom cursor image (png/...) instead of the arrow
+  --cursor-hotspot X,Y  click point as a fraction of the image (default 0,0 = top-left)
+  --cursor-size F   cursor height as a fraction of output height (default 0.06)
+
+direction tuning (auto-zoom + cursor feel):
+  --zoom   F              punch-in zoom factor for activity     (default 1.8)
+  --zoom-merge-gap S      idle gap below which zoom pans instead
+                          of zooming out and back in            (default 2.5)
+  --cursor-omega-fast R   cursor-spring stiffness when moving
+                          fast -- higher = snappier, less lag   (default 30.0)
+  --cursor-anticipate S   seconds before a click to start aiming
+                          the cursor straight at it             (default 0.4)
+
   Pops a screen-share dialog; click GNOME's Stop button (top bar) to finish. The
   cursor hides during capture (auto-zoom needs its position), restored on exit.
+
+takesy  Copyright (C) 2026  Anthony Green <green@moxielogic.com>
+Distributed under the MIT license; this is free software with NO WARRANTY.
 ")
 
+(defun %render-args (o)
+  "Extract RENDER-RECORDING keyword args (direction tuning + output) from the
+option alist O, applying defaults. Shared by `record` and `render`."
+  (let ((bg-str (opt o "bg" nil)))
+    (list :fps               (opt-int o "fps" 24)
+          :max-height        (opt-int o "height" 1200)
+          :bg                (if bg-str (parse-color bg-str) '(0.11 0.12 0.15))
+          :corner            (opt-num o "corner-radius" 0.09)
+          :cursor            (opt o "cursor" nil)
+          :cursor-hotspot    (let ((s (opt o "cursor-hotspot" nil)))
+                               (if s (parse-xy s) '(0.0 . 0.0)))
+          :cursor-size       (when (opt o "cursor-size" nil)
+                               (opt-num o "cursor-size" 0.06))
+          :zoom              (opt-num o "zoom" 1.8)
+          :zoom-merge-gap    (opt-num o "zoom-merge-gap" 2.5)
+          :cursor-omega-fast (opt-num o "cursor-omega-fast" 30.0)
+          :cursor-anticipate (opt-num o "cursor-anticipate" 0.4)
+          :out               (opt o "output" "/tmp/takesy-record.mp4"))))
+
 (defun cmd-record (args)
-  (let* ((o     (parse-kv args))
-         (out   (opt o "output" "/tmp/takesy-record.mp4"))
-         (dur   (opt-num o "duration" 30.0))
-         (fps   (opt-int o "fps" 24))
-         (height (opt-int o "height" 1200))
-         (bg-str (opt o "bg" nil))
-         (bg    (if bg-str (parse-color bg-str) '(0.11 0.12 0.15))))
-    (format t "takesy: recording up to ~,0Fs @ ~Dfps, up to ~Dp tall -> ~A~%" dur fps height out)
+  "Full pipeline: capture then render in one shot (the default action)."
+  (let* ((o   (parse-kv args))
+         (dur (opt-num o "duration" 30.0))
+         (fps (opt-int o "fps" 24))
+         (dir (opt o "dir" "/tmp/takesy-rec"))
+         (ra  (%render-args o)))
+    (format t "takesy: recording up to ~,0Fs @ ~Dfps, up to ~Dp tall -> ~A~%"
+            dur fps (getf ra :max-height) (getf ra :out))
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
-    (multiple-value-bind (path n)
-        (rec:record-to-mp4 :duration dur :fps fps :max-height height :bg bg :out out)
-      (format t "done: wrote ~A (~D frames)~%" path n)
-      path)))
+    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir)))
+      (multiple-value-bind (path n) (apply #'rec:render-recording rec ra)
+        (format t "done: wrote ~A (~D frames)~%" path n)
+        (format t "  re-render this capture with: takesy render ~A [--bg ... --zoom ...]~%" dir)
+        path))))
+
+(defun cmd-capture (args)
+  "Capture stage only: record to DIR (frames + intermediate + manifest.sexp) so it
+can be rendered -- and re-rendered with different config -- later."
+  (let* ((o   (parse-kv args))
+         (dur (opt-num o "duration" 30.0))
+         (fps (opt-int o "fps" 24))
+         (dir (opt o "dir" "/tmp/takesy-rec")))
+    (format t "takesy: capturing up to ~,0Fs @ ~Dfps -> ~A~%" dur fps dir)
+    (format t "  a screen-share dialog will appear -- pick a source.~%~
+                 click GNOME's Stop button (top bar) to finish.~%")
+    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir)))
+      (format t "done: captured ~D frames to ~A~%" (length (getf rec :frames)) dir)
+      (format t "  render it with: takesy render ~A [--output out.mp4 --bg ... --zoom ...]~%" dir)
+      dir)))
+
+(defun cmd-render (args)
+  "Direct + composite stages only: render a previously-captured DIR to an mp4.
+Re-runnable with different tuning without re-capturing."
+  (let ((dir (first args)))
+    (when (or (null dir)
+              (and (>= (length dir) 2) (string= (subseq dir 0 2) "--")))
+      (error "render needs a recording DIR: takesy render DIR [options]"))
+    (let* ((ra (%render-args (parse-kv (rest args)))))
+      (format t "takesy: rendering ~A -> ~A~%" dir (getf ra :out))
+      (multiple-value-bind (path n) (apply #'rec:render-recording-dir dir ra)
+        (format t "done: wrote ~A (~D frames)~%" path n)
+        path))))
 
 (defun run (args)
   "Dispatch ARGS (the command-line minus argv0). Recording is the default action,
-so `takesy [options]` records; `help` is the only named subcommand (`record` is
-still accepted). Return normally on success; signal on failure. Separate from
-MAIN so it is REPL-callable."
+so `takesy [options]` records; `capture` and `render` split the pipeline so one
+capture can be rendered repeatedly with different config. `help` prints usage.
+Return normally on success; signal on failure. Separate from MAIN so it is
+REPL-callable."
   (let ((cmd (first args)))
     (cond
       ((member cmd '("help" "--help" "-h") :test #'equal) (write-string +usage+) nil)
-      ((equal cmd "record") (cmd-record (rest args)))  ; still accepted, but optional
+      ((equal cmd "capture") (cmd-capture (rest args)))
+      ((equal cmd "render")  (cmd-render (rest args)))
+      ((equal cmd "record")  (cmd-record (rest args)))  ; still accepted, but optional
       (t (cmd-record args)))))                          ; default: just record
 
 ;;; ------------------------------------------------------------------

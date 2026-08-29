@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+# SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 # SPDX-License-Identifier: MIT
 # takesy -- a screen recorder for modern Linux desktops (Wayland & X11)
 

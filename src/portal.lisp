@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 ;;;; SPDX-License-Identifier: MIT
 ;;;; portal.lisp
 ;;;;
@@ -107,6 +107,47 @@ restores cursor/input state (never rely on the connection dropping)."
                       :destination +portal-dest+ :signature "" :arguments '()))))
 
 ;;; ------------------------------------------------------------------
+;;; Signal-safety (green-screen-un8). UNWIND-PROTECT restores portal/PW state on
+;;; Lisp errors and normal exit, but NOT on a hard process kill: SIGTERM/SIGINT
+;;; (harness timeout, Ctrl-C, kill) terminates without unwinding, so close-session
+;;; never fires and -- on the METADATA cursor-hiding path -- Mutter can be left
+;;; with a hidden cursor + dead trackpad (AGENTS.md hazard #1). We track the live
+;;; session and install handlers that best-effort close it before exiting.
+
+(defvar *active-session* nil
+  "When a ScreenCast session is live, a (cons bus session) so a SIGTERM/SIGINT
+handler can best-effort close it. NIL when no session is up, making the handler a
+harmless exit.")
+
+(defvar *signal-handlers-installed* nil
+  "So ENSURE-SIGNAL-HANDLERS installs the SIGTERM/SIGINT handlers only once.")
+
+(defun %handle-fatal-signal (signo)
+  "SIGTERM/SIGINT handler: best-effort tear down the tracked session, then exit.
+Runs in signal context, so it must not rely on unwinding -- close the session
+directly. Clearing *ACTIVE-SESSION* first keeps a second signal from re-entering
+the (already best-effort, ignore-errors-wrapped) D-Bus close."
+  (let ((active *active-session*))
+    (setf *active-session* nil)
+    (when active
+      (close-session (car active) (cdr active))))
+  ;; :abort t -- skip unwinding (we've already done the one cleanup that matters);
+  ;; 128+signo is the conventional shell exit code for death by that signal.
+  (sb-ext:exit :code (+ 128 signo) :abort t))
+
+(defun ensure-signal-handlers ()
+  "Idempotently install best-effort SIGTERM/SIGINT teardown handlers. Safe to call
+before every screencast; only the first call installs."
+  (unless *signal-handlers-installed*
+    (dolist (signo (list sb-unix:sigint sb-unix:sigterm))
+      (sb-sys:enable-interrupt
+       signo
+       (lambda (sig info context)
+         (declare (ignore info context))
+         (%handle-fatal-signal sig))))
+    (setf *signal-handlers-installed* t)))
+
+;;; ------------------------------------------------------------------
 ;;; The public entry: open a screencast, run BODY with (fd node-id) bound, and
 ;;; always tear the session down.
 
@@ -146,6 +187,7 @@ restores it). Pops the interactive share dialog."
   (let ((bus (gensym "BUS")) (session (gensym "SESSION")))
     `(d:with-open-bus (,bus (d:session-server-addresses))
        (takesy/dbus-fd:enable-fd-passing ,bus)
+       (ensure-signal-handlers)   ; best-effort teardown on SIGTERM/SIGINT (un8)
        ;; SESSION is set (not rebound) inside the protected form so the cleanup
        ;; always sees the real handle even on error/cancel.
        (let ((,session nil) (,fd-var nil) (,node-var nil))
@@ -154,5 +196,9 @@ restores it). Pops the interactive share dialog."
               (progn
                 (multiple-value-setq (,fd-var ,node-var ,session)
                   (%open-screencast ,bus ,cursor-mode))
+                ;; Publish the live handle so a hard kill can close it (the
+                ;; unwind-protect below won't run on SIGTERM/SIGINT).
+                (setf *active-session* (cons ,bus ,session))
                 ,@body)
+           (setf *active-session* nil)
            (close-session ,bus ,session))))))

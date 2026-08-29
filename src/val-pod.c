@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+// SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 // SPDX-License-Identifier: MIT
 /* val-pod.c -- validate a hand-built SPA POD by parsing it with real SPA.
  *

@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 ;;;; SPDX-License-Identifier: MIT
 ;;;; compositor.lisp
 ;;;;
@@ -683,6 +683,34 @@ void main() {
   frag = vec4(col, a);
 }")
 
+(defparameter +fs-cursor-image+
+  "#version 330 core
+in vec2 v_uv;
+out vec4 frag;
+uniform sampler2D u_tex;
+uniform vec2  u_canvas;
+uniform vec2  u_cursor;    // hotspot in framebuffer px
+uniform vec2  u_size;      // drawn cursor size in px (w,h)
+uniform vec2  u_hotspot;   // hotspot as a fraction of the image (0..1)
+uniform float u_padding;
+uniform float u_corner;
+
+float sd_round_box(vec2 p, vec2 b, float r) {
+  vec2 q=abs(p)-b+vec2(r); return min(max(q.x,q.y),0.0)+length(max(q,0.0))-r;
+}
+void main() {
+  vec2 P = v_uv * u_canvas;
+  vec2 pad = u_padding * u_canvas;
+  vec2 lo=pad, hi=u_canvas-pad, sz=hi-lo, ctr=0.5*(lo+hi);
+  if (sd_round_box(P-ctr, 0.5*sz, u_corner*min(sz.x,sz.y)) > 0.0) discard;  // clip to content
+  // image space: hotspot sits at u_cursor; image extends by u_size around it.
+  vec2 uv = (P - u_cursor) / u_size + u_hotspot;
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
+  vec4 c = texture(u_tex, uv);
+  if (c.a <= 0.003) discard;                     // fully-transparent pixels
+  frag = c;
+}")
+
 (defun cursor-output-px (cursor-uv keyframe out-w out-h)
   "Map a cursor source-UV (cons u . v) through KEYFRAME's zoom/pan/padding to a
 framebuffer pixel position. Return (values px py visible-p) -- visible-p is nil
@@ -711,10 +739,32 @@ when the cursor falls outside the zoomed content view."
   (gl:draw-arrays :triangle-strip 0 4)
   (gl:disable :blend))
 
+(defun draw-cursor-image (program vao tex px py w h hotspot keyframe out-w out-h)
+  "Draw a user cursor texture TEX with its HOTSPOT (cons hx . hy, fraction of the
+image) placed at framebuffer (PX,PY), sized W x H px, clipped to the content rect."
+  (gl:use-program program)
+  (gl:active-texture :texture0)
+  (gl:bind-texture :texture-2d tex)
+  (flet ((uni (n) (gl:get-uniform-location program n)))
+    (let ((l (uni "u_tex")))     (when (>= l 0) (gl:uniformi l 0)))
+    (let ((l (uni "u_canvas")))  (when (>= l 0) (gl:uniformf l (float out-w 1.0) (float out-h 1.0))))
+    (let ((l (uni "u_cursor")))  (when (>= l 0) (gl:uniformf l (float px 1.0) (float py 1.0))))
+    (let ((l (uni "u_size")))    (when (>= l 0) (gl:uniformf l (float w 1.0) (float h 1.0))))
+    (let ((l (uni "u_hotspot"))) (when (>= l 0) (gl:uniformf l (float (car hotspot) 1.0) (float (cdr hotspot) 1.0))))
+    (let ((l (uni "u_padding"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-padding keyframe) 1.0))))
+    (let ((l (uni "u_corner")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-corner-radius keyframe) 1.0)))))
+  (gl:enable :blend)
+  (gl:blend-func :src-alpha :one-minus-src-alpha)
+  (gl:bind-vertex-array vao)
+  (gl:draw-arrays :triangle-strip 0 4)
+  (gl:disable :blend))
+
 (defun render-frame-sequence (keyframes frame-fn n-frames out-w out-h
                               &key (fps 30) (source-format :rgba)
                                    (source-width out-w) (source-height out-h)
                                    (time-fn nil) (cursor-fn nil)
+                                   (cursor-image nil) (cursor-hotspot '(0.0 . 0.0))
+                                   (cursor-size nil)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
   "Render a real per-frame video into an OUT-W x OUT-H canvas. FRAME-FN is
@@ -724,17 +774,31 @@ the output size, so a 3840x2400 capture can render to a small canvas. The compos
 shader is driven by KEYFRAMES sampled at (TIME-FN i) seconds, or i/FPS if TIME-FN
 is nil. CURSOR-FN, if given, is (i) -> (cons u . v) source-UV of the (eased)
 cursor for frame I, or nil to draw none; it is transformed through the frame's
-zoom and drawn as an overlay. The texture is uploaded once and updated each frame."
+zoom and drawn as an overlay. CURSOR-IMAGE, when given, is (list rgba-bytes w h)
+for a user cursor drawn instead of the built-in arrow, with CURSOR-HOTSPOT (cons
+hx . hy, fraction of the image) as the click point and CURSOR-SIZE its height as a
+fraction of OUT-H. The texture is uploaded once and updated each frame."
   (let ((raw (format nil "~A.raw" path)))
     (egl:with-headless-gl (ctx out-w out-h)
       (declare (ignore ctx))
       (make-fbo out-w out-h)
       (let* ((program  (make-program +vs-passthrough+ +fs-compose+))
-             (curs-prog (when cursor-fn (make-program +vs-passthrough+ +fs-cursor+)))
+             (curs-prog (when (and cursor-fn (not cursor-image))
+                          (make-program +vs-passthrough+ +fs-cursor+)))
+             (img-prog  (when (and cursor-fn cursor-image)
+                          (make-program +vs-passthrough+ +fs-cursor-image+)))
              (vao      (make-fullscreen-quad))
              (tex      (make-texture-rgba (funcall frame-fn 0) source-width source-height
                                           :source-format source-format :filter :linear))
-             (cur-size (* out-h 0.030)))
+             (cur-tex  (when cursor-image
+                         (make-texture-rgba (first cursor-image)
+                                            (second cursor-image) (third cursor-image)
+                                            :source-format :rgba :filter :linear)))
+             (cur-size (* out-h 0.030))                    ; built-in arrow scale
+             (img-h    (* out-h (or cursor-size 0.06)))    ; user cursor height, px
+             (img-w    (when cursor-image
+                         (* img-h (/ (float (second cursor-image) 1.0)
+                                     (float (third cursor-image) 1.0))))))
         (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
                                :if-exists :supersede)
           (dotimes (i n-frames)
@@ -746,13 +810,17 @@ zoom and drawn as an overlay. The texture is uploaded once and updated each fram
               (gl:clear-color 0.0 0.0 0.0 1.0)
               (gl:clear :color-buffer-bit)
               (draw-compose program vao tex frame out-w out-h crop)
-              (when curs-prog
+              (when cursor-fn
                 (let ((cuv (funcall cursor-fn i)))
                   (when cuv
                     (multiple-value-bind (px py vis)
                         (cursor-output-px cuv frame out-w out-h)
                       (when vis
-                        (draw-cursor curs-prog vao px py cur-size frame out-w out-h))))))
+                        (if img-prog
+                            (draw-cursor-image img-prog vao cur-tex px py
+                                               img-w img-h cursor-hotspot
+                                               frame out-w out-h)
+                            (draw-cursor curs-prog vao px py cur-size frame out-w out-h)))))))
               (gl:finish)
               (write-sequence (read-rgba out-w out-h) s))))
         (%encode-raw raw out-w out-h fps path n-frames)))))

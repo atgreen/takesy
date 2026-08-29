@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 ;;;; SPDX-License-Identifier: MIT
 ;;;; build.lisp -- build the `takesy` executable.
 ;;;;
@@ -27,4 +27,9 @@
   (format t "~&Dumping ./takesy ...~%")
   (sb-ext:save-lisp-and-die "takesy"
                             :toplevel (fdefinition main)
-                            :executable t))
+                            :executable t
+                            ;; Keep the SBCL runtime from eating our args: without
+                            ;; this it intercepts --help/--version/--dynamic-space-
+                            ;; size before the toplevel runs. With it, every arg
+                            ;; reaches takesy/cli (so `takesy --help` is ours).
+                            :save-runtime-options t))

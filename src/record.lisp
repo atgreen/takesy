@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <anthony@atgreen.org>
+;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
 ;;;; SPDX-License-Identifier: MIT
 ;;;; record.lisp
 ;;;;
@@ -12,7 +12,8 @@
   (:local-nicknames (#:portal #:takesy/portal) (#:pw #:takesy/pipewire)
                     (#:dir #:takesy/director) (#:comp #:takesy/compositor))
   (:export #:recording->session #:compute-damage #:compute-content-bbox
-           #:compose-recording #:record-to-mp4))
+           #:compose-recording #:record-to-mp4 #:load-image-rgba
+           #:capture-recording #:render-recording #:render-recording-dir))
 
 (in-package #:takesy/record)
 
@@ -21,6 +22,33 @@
     (let ((v (make-array (file-length s) :element-type '(unsigned-byte 8))))
       (read-sequence v s)
       v)))
+
+(defun load-image-rgba (path)
+  "Decode image PATH (png/jpg/... anything ffmpeg reads) to (values rgba-bytes w h).
+No PNG reader in-tree, so reuse ffmpeg: ffprobe for the dimensions, then ffmpeg to
+rawvideo RGBA. Signals if the file is missing or the byte count doesn't match."
+  (unless (probe-file path)
+    (error "cursor image not found: ~A" path))
+  (let* ((dims (uiop:run-program
+                (list "ffprobe" "-v" "error" "-select_streams" "v:0"
+                      "-show_entries" "stream=width,height" "-of" "csv=p=0:s=x" path)
+                :output '(:string :stripped t)))
+         (xpos (or (position #\x dims)
+                   (error "could not read dimensions of ~A (ffprobe: ~S)" path dims)))
+         (w    (parse-integer dims :end xpos))
+         (h    (parse-integer dims :start (1+ xpos)))
+         (raw  (format nil "/tmp/takesy-cursor-~A.raw" (sxhash (namestring (truename path))))))
+    (unwind-protect
+         (progn
+           (uiop:run-program
+            (list "ffmpeg" "-y" "-loglevel" "error" "-i" path
+                  "-f" "rawvideo" "-pix_fmt" "rgba" raw))
+           (let ((bytes (%read-file-bytes raw)))
+             (unless (= (length bytes) (* w h 4))
+               (error "cursor image ~A decoded to ~D bytes, expected ~D (~Dx~D)"
+                      path (length bytes) (* w h 4) w h))
+             (values bytes w h)))
+      (ignore-errors (delete-file raw)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Decoding the compressed capture intermediate (green-screen-am4.18). ffmpeg
@@ -200,6 +228,9 @@ the first. FRAMES is a vector in ascending :time order."
 (defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (max-height 1200)
                                             (fps 24) (duration nil)
                                             (cursor-session nil)
+                                            (cursor-image nil)
+                                            (cursor-hotspot '(0.0 . 0.0))
+                                            (cursor-size nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
@@ -247,39 +278,67 @@ without an over-large file."
                   :fps fps :source-format :bgra
                   :source-width fw :source-height fh
                   :time-fn (lambda (i) (/ i (float fps 1.0)))
-                  :cursor-fn cursor-fn :crop crop
+                  :cursor-fn cursor-fn
+                  :cursor-image cursor-image :cursor-hotspot cursor-hotspot
+                  :cursor-size cursor-size
+                  :crop crop
                   :path out))
             (%close-decoder dec)))))))
 
-(defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
-                           (bg '(0.11 0.12 0.15))
-                           (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
-  "Full `takesy record`: capture the screen (METADATA cursor mode, armed teardown)
-until you end the share -- click GNOME's Stop button in the top bar -- or DURATION
-seconds elapse as a safety cap. Then auto-zoom via the Director (dwell-based) and
-render the real captured frames to a full-length mp4 at OUT, with the eased cursor
-overlay. FPS is the OUTPUT rate; static stretches hold the last frame. The output
-length is the ACTUAL captured span, not the cap. Return (values out n-frames)."
+(defun capture-recording (&key (duration 30.0) (fps 24) (dir "/tmp/takesy-rec"))
+  "Capture stage only: pop the screen-share dialog and record until you end the
+share -- click GNOME's Stop button in the top bar -- or DURATION seconds elapse as
+a safety cap. Frames (and the compressed intermediate) are written under DIR, and
+RECORD-FRAMES persists a manifest.sexp there so the recording is self-contained and
+can be re-rendered later with LOAD-RECORDING + RENDER-RECORDING. FPS only sets the
+capture throttle (a bit above the output rate). Return the recording plist."
   (portal:with-screencast (fd node :cursor-mode portal:+cursor-metadata+)
-    (format t "  [record] recording... click the Stop button in the GNOME top bar ~
+    (format t "  [capture] recording... click the Stop button in the GNOME top bar ~
                  to finish (or ~,0Fs max).~%" duration)
     ;; Capture throttle a bit above the output rate so we keep enough source
     ;; frames; the real limit is the compositor's on-change delivery.
-    (let* ((rec      (pw:record-frames fd node :duration duration
-                                       :max-fps (max fps 30) :dir dir))
-           ;; Crop to the real content (trim empty desktop borders) -- everything
+    (pw:record-frames fd node :duration duration :max-fps (max fps 30) :dir dir)))
+
+(defun render-recording (rec &key (fps 24) (max-height 1200)
+                                  (bg '(0.11 0.12 0.15))
+                                  (corner 0.09)
+                                  (cursor nil)
+                                  (cursor-hotspot '(0.0 . 0.0))
+                                  (cursor-size nil)
+                                  (zoom dir:*zoom-level*)
+                                  (zoom-merge-gap dir:*zoom-merge-gap*)
+                                  (cursor-omega-fast dir:*cursor-omega-fast*)
+                                  (cursor-anticipate dir:*cursor-anticipate*)
+                                  (out "/tmp/takesy-record.mp4"))
+  "Direct + composite stages: auto-zoom REC via the Director (dwell-based) and
+render its real captured frames to a full-length mp4 at OUT, with the eased cursor
+overlay. FPS is the OUTPUT rate; static stretches hold the last frame. The output
+length is the ACTUAL captured span. ZOOM, ZOOM-MERGE-GAP, CURSOR-OMEGA-FAST, and
+CURSOR-ANTICIPATE tune the direction (they bind the Director specials for this
+render); CORNER is the rounded-corner radius (fraction of the min content dim; 0 =
+square corners). CURSOR, if given, is a path to an image drawn in place of the
+built-in arrow, with CURSOR-HOTSPOT (cons hx . hy, fraction of the image) as the
+click point and CURSOR-SIZE its height as a fraction of the output height. Pure
+function of REC -- no capture -- so it can be re-run against one capture with
+different config. Return (values out n-frames)."
+  (let ((dir:*zoom-level*        zoom)
+        (dir:*zoom-merge-gap*    zoom-merge-gap)
+        (dir:*cursor-omega-fast* cursor-omega-fast)
+        (dir:*cursor-anticipate* cursor-anticipate)
+        (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor)))))
+    (let* (;; Crop to the real content (trim empty desktop borders) -- everything
            ;; downstream works in this cropped frame.
            (crop     (or (compute-content-bbox rec) '(0.0 0.0 1.0 1.0)))
            (session  (recording->session rec crop))
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
            (timeline (progn (setf (dir:session-damage session) damage)
-                            (dir:plan-timeline session :bg bg)))  ; fit zoom to activity
+                            (dir:plan-timeline session :bg bg :corner corner)))  ; fit zoom to activity
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)
                                        :height (dir:session-height session)
                                        :cursor (dir:ease-cursor session))))
-      (format t "  [record] captured ~D frames (~D cursor, ~D changed) -> ~D keyframes~%"
+      (format t "  [render] ~D frames (~D cursor, ~D changed) -> ~D keyframes~%"
               (length (getf rec :frames))
               (length (dir:session-cursor session))
               (length damage)
@@ -287,4 +346,37 @@ length is the ACTUAL captured span, not the cap. Return (values out n-frames)."
       ;; No :duration -> compose uses the actual captured span (you decide the
       ;; length by when you click Stop).
       (compose-recording rec timeline :out out :max-height max-height
-                         :fps fps :cursor-session eased :crop crop))))
+                         :fps fps :cursor-session eased :crop crop
+                         :cursor-image cursor-image
+                         :cursor-hotspot cursor-hotspot :cursor-size cursor-size))))
+
+(defun render-recording-dir (dir &rest render-args)
+  "Load the manifest RECORD-FRAMES persisted under DIR and RENDER-RECORDING it.
+This is the re-render entry point: capture once, then re-run direction with
+different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
+  (apply #'render-recording (pw:load-recording dir) render-args))
+
+(defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
+                           (bg '(0.11 0.12 0.15))
+                           (corner 0.09)
+                           (cursor nil)
+                           (cursor-hotspot '(0.0 . 0.0))
+                           (cursor-size nil)
+                           (zoom dir:*zoom-level*)
+                           (zoom-merge-gap dir:*zoom-merge-gap*)
+                           (cursor-omega-fast dir:*cursor-omega-fast*)
+                           (cursor-anticipate dir:*cursor-anticipate*)
+                           (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
+  "Full `takesy record`: CAPTURE-RECORDING then RENDER-RECORDING in one shot --
+capture the screen (METADATA cursor mode) until you click GNOME's Stop button (or
+DURATION as a safety cap), then auto-zoom and composite to OUT. Kept as the
+one-call path; the two halves are separately callable so a capture can be
+re-rendered. Return (values out n-frames)."
+  (let ((rec (capture-recording :duration duration :fps fps :dir dir)))
+    (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
+                          :cursor cursor :cursor-hotspot cursor-hotspot
+                          :cursor-size cursor-size
+                          :zoom zoom :zoom-merge-gap zoom-merge-gap
+                          :cursor-omega-fast cursor-omega-fast
+                          :cursor-anticipate cursor-anticipate
+                          :out out)))

@@ -54,6 +54,20 @@ desktop's screencast **Stop** button to finish. The cursor is hidden during
 capture — takesy needs its position to drive the auto-zoom — and restored when
 you're done. (If you haven't run `make install`, invoke it as `./takesy`.)
 
+### Capture once, render many
+
+The pipeline splits so you can record once and re-render with different framing
+as often as you like — no re-recording:
+
+```sh
+takesy capture --dir /tmp/talk       # capture only -> self-contained recording dir
+takesy render /tmp/talk --output a.mp4 --bg dark
+takesy render /tmp/talk --output b.mp4 --bg navy --zoom 2.4   # same capture, new look
+```
+
+`capture` writes the frames plus a manifest into the dir; `render` runs the
+auto-zoom and compositing over it, honouring all the options below.
+
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--output PATH` | output mp4 | `/tmp/takesy-record.mp4` |
@@ -61,22 +75,31 @@ you're done. (If you haven't run `make install`, invoke it as `./takesy`.)
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
 | `--bg COLOR` | background colour — `#RRGGBB` or a name (`black`, `white`, `dark`, `navy`, `slate`, …) | `dark` |
+| `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
+| `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
+| `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |
+| `--cursor-size F` | cursor height as a fraction of the output height | `0.06` |
+
+### Direction tuning
+
+Dial the auto-zoom and cursor feel to taste:
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--zoom F` | punch-in zoom factor for activity | `1.8` |
+| `--zoom-merge-gap S` | idle gap (s) below which the zoom pans between spots instead of zooming out and back in | `2.5` |
+| `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher is snappier with less lag | `30.0` |
+| `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.4` |
 
 ## How it works
 
 1. **Capture** — receives frames and the cursor position over
    `xdg-desktop-portal` + PipeWire.
-2. **Direct** (pure Lisp) — detects where you focused, plans eased auto-zoom
-   keyframes fit to the active region, and smooths the cursor path.
+2. **Direct** — detects where you focused, plans eased auto-zoom keyframes fit to
+   the active region, and smooths the cursor path.
 3. **Composite** (GPU) — renders the zoom, background, rounded corners, drop
    shadow, and cursor overlay with EGL/OpenGL, then encodes to an mp4 via
    `ffmpeg`.
-
-## Customizing
-
-The direction is tunable from the Lisp side — for example
-`takesy/director:*zoom-level*`, `*zoom-merge-gap*`, `*cursor-omega-fast*`, and
-`*cursor-anticipate*` — so you can dial the zoom and cursor feel to taste.
 
 ## License
 
