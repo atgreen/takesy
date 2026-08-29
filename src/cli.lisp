@@ -150,8 +150,9 @@ options:
                     or `blur` (a frosted, blurred copy of the screen)
   --bg-image PATH   background image (png/...), cover-fit behind the inset;
                     overrides --bg
-  --aspect W:H      reframe output to an aspect (e.g. 9:16 vertical, 1:1),
-                    keeping the active region centered (default: content aspect)
+  --aspect W:H      reframe output to an aspect (e.g. 9:16 vertical, 1:1);
+                    the screen is scaled to fit inside it (letterboxed, no crop)
+  --margin F        inset margin around the screen, fraction of the frame (default 0.04)
   --region X,Y,W,H  frame a fixed screen region (source px) instead of auto-crop
   --corner-radius F rounded-corner radius, fraction of content (default 0.09;
                     0 = square corners)
@@ -210,6 +211,7 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :idle-threshold    (opt-num o "idle-threshold" 1.2)
           :max-idle          (opt-num o "max-idle" 0.4)
           :corner            (opt-num o "corner-radius" 0.09)
+          :margin            (opt-num o "margin" 0.04)
           :cursor            (opt o "cursor" nil)
           :cursor-hotspot    (let ((s (opt o "cursor-hotspot" nil)))
                                (if s (parse-xy s) '(0.0 . 0.0)))

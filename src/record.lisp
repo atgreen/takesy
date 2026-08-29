@@ -333,6 +333,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                                             (audio nil)
                                             (time-warp nil) (out-duration nil)
+                                            (aspect nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
@@ -353,8 +354,12 @@ without an over-large file."
              (nout (max 1 (round (* fps dur))))
              (fw (getf rec :width)) (fh (getf rec :height))    ; full frame = texture
              (cw (* (- cx1 cx0) fw)) (ch (* (- cy1 cy0) fh))   ; cropped content px
+             (content-aspect (/ cw (max 1.0 ch)))
+             ;; Output canvas aspect: the content's, or a requested ASPECT (W . H).
+             ;; The compositor CONTAINS the content in it (letterbox, no crop).
+             (target-aspect (if aspect (/ (float (car aspect) 1.0) (cdr aspect)) content-aspect))
              (oh (* 2 (max 1 (round (/ (min ch (float max-height 1.0)) 2)))))
-             (ow (* 2 (max 1 (round (/ (* cw (/ oh ch)) 2)))))
+             (ow (* 2 (max 1 (round (/ (* oh target-aspect) 2)))))
              (cache-idx -1) (cache-bytes nil)
              (src-time (lambda (i) (funcall warp (/ i (float fps 1.0)))))  ; out frame -> src time
              (cursor-fn (when cursor-session   ; cursor coords are in cropped px
@@ -400,6 +405,7 @@ without an over-large file."
                     :clicks clicks :ripple-color ripple-color
                     :webcam-fn webcam-fn :webcam-dims (when webcam (cons ww wh))
                     :webcam-pos webcam-pos :webcam-size webcam-size
+                    :content-aspect content-aspect
                     :audio audio
                     :crop crop
                     :path out)))
@@ -460,6 +466,7 @@ recording plist."
 (defun render-recording (rec &key (fps 24) (max-height 1200)
                                   (bg '(0.11 0.12 0.15))
                                   (corner 0.09)
+                                  (margin 0.04)
                                   (cursor nil)
                                   (cursor-hotspot '(0.0 . 0.0))
                                   (cursor-size nil)
@@ -496,17 +503,16 @@ different config. Return (values out n-frames)."
            ;; auto-crop to the real content (trim empty desktop borders).
            ;; Everything downstream works in this cropped frame. ASPECT (cons w . h)
            ;; then reshapes it to a target output aspect (e.g. 9:16 vertical).
-           (crop0    (cond (region (%region-uv region (getf rec :width) (getf rec :height)))
+           ;; ASPECT changes only the OUTPUT canvas shape; the compositor CONTAINS
+           ;; the content in it (letterbox), so we keep the full content crop here.
+           (crop     (cond (region (%region-uv region (getf rec :width) (getf rec :height)))
                            ((compute-content-bbox rec))
                            (t '(0.0 0.0 1.0 1.0))))
-           (crop     (if aspect
-                         (%reshape-crop crop0 (getf rec :width) (getf rec :height)
-                                        (car aspect) (cdr aspect))
-                         crop0))
            (session  (recording->session rec crop))
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
            (timeline (progn (setf (dir:session-damage session) damage)
-                            (dir:plan-timeline session :bg bg :corner corner)))  ; fit zoom to activity
+                            (dir:plan-timeline session :bg bg :corner corner
+                                               :padding margin)))  ; fit zoom to activity
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)
@@ -529,7 +535,7 @@ different config. Return (values out n-frames)."
       ;; No :duration -> compose uses the actual captured span (you decide the
       ;; length by when you click Stop).
       (compose-recording rec timeline :out out :max-height max-height
-                         :fps fps :cursor-session eased :crop crop
+                         :fps fps :cursor-session eased :crop crop :aspect aspect
                          :cursor-image cursor-image
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
                          :bg-image bg-image-data :bg-blur bg-blur
@@ -554,6 +560,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
 (defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
                            (bg '(0.11 0.12 0.15))
                            (corner 0.09)
+                           (margin 0.04)
                            (cursor nil)
                            (cursor-hotspot '(0.0 . 0.0))
                            (cursor-size nil)
@@ -578,7 +585,7 @@ one-call path; the two halves are separately callable so a capture can be
 re-rendered. Return (values out n-frames)."
   (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio
                                 :countdown countdown)))
-    (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
+    (render-recording rec :fps fps :max-height max-height :bg bg :corner corner :margin margin
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
                           :aspect aspect :region region

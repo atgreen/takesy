@@ -380,6 +380,7 @@ uniform float u_zoom;
 uniform vec2  u_center;    // pre-clamped focal point, source UV
 uniform vec2  u_canvas;       // output size in px (W,H)
 uniform float u_padding;      // inset margin, fraction of min(W,H)
+uniform float u_content_aspect; // content width/height (for contain-fit)
 uniform float u_corner;       // rounded-rect radius, fraction of min(content dim)
 uniform vec3  u_bg;           // background colour (bg mode 0)
 uniform sampler2D u_bgtex;    // background image (bg mode 1)
@@ -398,11 +399,17 @@ float sd_round_box(vec2 p, vec2 b, float r) {
 
 void main() {
   vec2  P   = v_uv * u_canvas;                     // pixel coordinate
-  vec2  pad = u_padding * u_canvas;                // per-axis padding: the inset
-  vec2  lo  = pad;                                 // keeps the source aspect (no
-  vec2  hi  = u_canvas - pad;                      // stretch), since the canvas
-  vec2  sz  = hi - lo;                             // already matches it
-  vec2  ctr = 0.5 * (lo + hi);
+  // Fit the content (aspect u_content_aspect) inside the canvas minus a uniform
+  // margin, centred (contain) -- a wide screen in a square canvas shrinks and
+  // letterboxes rather than cropping.
+  float m   = u_padding * min(u_canvas.x, u_canvas.y);
+  vec2  av  = u_canvas - 2.0 * vec2(m);
+  vec2  sz  = (av.x / av.y > u_content_aspect)
+                ? vec2(av.y * u_content_aspect, av.y)
+                : vec2(av.x, av.x / u_content_aspect);
+  vec2  ctr = 0.5 * u_canvas;
+  vec2  lo  = ctr - 0.5 * sz;
+  vec2  hi  = ctr + 0.5 * sz;
   vec2  b   = 0.5 * sz;
   float r   = u_corner * min(sz.x, sz.y);
   float d   = sd_round_box(P - ctr, b, r);
@@ -444,7 +451,7 @@ void main() {
 
 (defun draw-compose (program vao tex frame canvas-w canvas-h
                      &optional (crop '(0.0 0.0 1.0 1.0))
-                     &key bg-tex bg-size bg-blur (bg-blur-lod 6.0))
+                     &key bg-tex bg-size bg-blur (bg-blur-lod 6.0) (content-aspect 1.0))
   "Draw FRAME's zoomed screen inset on its background, rounded corners, into the
 bound FBO. CANVAS-W/H are the output size in pixels. CROP (x0 y0 x1 y1 in source
 UV) selects the region of the source to show -- used to trim empty desktop
@@ -472,6 +479,7 @@ backdrop instead. Precedence: image > blur > solid FRAME colour."
       (let ((l (uni "u_center")))  (when (>= l 0) (gl:uniformf l (float (car ec) 1.0) (float (cdr ec) 1.0))))
       (let ((l (uni "u_canvas")))  (when (>= l 0) (gl:uniformf l (float canvas-w 1.0) (float canvas-h 1.0))))
       (let ((l (uni "u_padding"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-padding frame) 1.0))))
+      (let ((l (uni "u_content_aspect"))) (when (>= l 0) (gl:uniformf l (float content-aspect 1.0))))
       (let ((l (uni "u_corner")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-corner-radius frame) 1.0))))
       (let ((l (uni "u_shadow_blur")))  (when (>= l 0) (gl:uniformf l (float (kf:keyframe-shadow-blur frame) 1.0))))
       (let ((l (uni "u_shadow_alpha"))) (when (>= l 0) (gl:uniformf l (float (kf:keyframe-shadow-alpha frame) 1.0))))
@@ -802,19 +810,29 @@ void main() {
   frag = c;
 }")
 
-(defun cursor-output-px (cursor-uv keyframe out-w out-h)
-  "Map a cursor source-UV (cons u . v) through KEYFRAME's zoom/pan/padding to a
-framebuffer pixel position. Return (values px py visible-p) -- visible-p is nil
-when the cursor falls outside the zoomed content view."
+(defun %fit-inset (out-w out-h padding content-aspect)
+  "The largest CONTENT-ASPECT rect that fits inside OUT-W x OUT-H minus a uniform
+PADDING margin, centred (contain-fit). Return (values lo-x lo-y sz-x sz-y). Mirrors
+the compose shader's inset computation so overlays land on the content."
+  (let* ((m  (* padding (min out-w out-h)))
+         (aw (- out-w (* 2 m))) (ah (- out-h (* 2 m)))
+         (ca (if (and content-aspect (plusp content-aspect)) content-aspect (/ aw ah))))
+    (multiple-value-bind (sx sy)
+        (if (> (/ aw ah) ca) (values (* ah ca) ah) (values aw (/ aw ca)))
+      (values (* 0.5 (- out-w sx)) (* 0.5 (- out-h sy)) sx sy))))
+
+(defun cursor-output-px (cursor-uv keyframe out-w out-h &optional content-aspect)
+  "Map a cursor source-UV (cons u . v) through KEYFRAME's zoom/pan and the
+contain-fit inset to a framebuffer pixel position. Return (values px py visible-p);
+visible-p is nil when the cursor falls outside the zoomed content view."
   (let* ((ec (kf:effective-center keyframe))
          (z  (kf:keyframe-zoom keyframe))
          (p  (kf:keyframe-padding keyframe))
-         (mx (* p out-w)) (my (* p out-h))       ; per-axis padding, matches shader
-         (sx (- out-w (* 2 mx))) (sy (- out-h (* 2 my)))
          (cuvx (+ 0.5 (* (- (car cursor-uv) (car ec)) z)))
          (cuvy (+ 0.5 (* (- (cdr cursor-uv) (cdr ec)) z))))
-    (values (+ mx (* cuvx sx)) (+ my (* cuvy sy))
-            (and (<= 0.0 cuvx 1.0) (<= 0.0 cuvy 1.0)))))
+    (multiple-value-bind (lo-x lo-y sz-x sz-y) (%fit-inset out-w out-h p content-aspect)
+      (values (+ lo-x (* cuvx sz-x)) (+ lo-y (* cuvy sz-y))
+              (and (<= 0.0 cuvx 1.0) (<= 0.0 cuvy 1.0))))))
 
 (defun draw-cursor (program vao px py size keyframe out-w out-h)
   (gl:use-program program)
@@ -954,6 +972,7 @@ framebuffer (CX,CY) with RADIUS px and a soft border."
                                    (webcam-fn nil) (webcam-dims nil)
                                    (webcam-pos :br) (webcam-size 0.22)
                                    (audio nil)
+                                   (content-aspect 1.0)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
   "Render a real per-frame video into an OUT-W x OUT-H canvas. FRAME-FN is
@@ -1028,7 +1047,8 @@ and updated each frame."
                    (gl:clear-color 0.0 0.0 0.0 1.0)
                    (gl:clear :color-buffer-bit)
                    (draw-compose program vao tex frame out-w out-h crop
-                                 :bg-tex bg-tex :bg-size bg-size :bg-blur bg-blur)
+                                 :bg-tex bg-tex :bg-size bg-size :bg-blur bg-blur
+                                 :content-aspect content-aspect)
                    ;; Click ripples (under the cursor): an expanding, fading ring
                    ;; at each recent click, placed via the cursor track at click time.
                    (when ripple-prog
@@ -1040,7 +1060,7 @@ and updated each frame."
                                   (cuv  (funcall cursor-fn ci)))
                              (when cuv
                                (multiple-value-bind (px py vis)
-                                   (cursor-output-px cuv frame out-w out-h)
+                                   (cursor-output-px cuv frame out-w out-h content-aspect)
                                  (when vis
                                    (draw-ripple ripple-prog vao px py
                                                 (* prog rip-max-r) rip-thick
@@ -1054,7 +1074,7 @@ and updated each frame."
                                       0.72 1.0)))
                        (when cuv
                          (multiple-value-bind (px py vis)
-                             (cursor-output-px cuv frame out-w out-h)
+                             (cursor-output-px cuv frame out-w out-h content-aspect)
                            (when vis
                              (if img-prog
                                  (draw-cursor-image img-prog vao cur-tex px py
