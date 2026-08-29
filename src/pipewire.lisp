@@ -41,12 +41,47 @@
   ;; then, so negotiation latency doesn't shorten the clip -- bead am4.7).
   (record-start nil) (record-duration 0) (record-min-dt 0) (record-last nil)
   (record-budget 0) (max-frames 0) (n-saved 0) (frames '())
+  ;; pause/resume (SIGUSR1): while paused, frames aren't saved and paused time is
+  ;; excluded from the timeline (record-start is shifted on resume).
+  (paused nil) (pause-start nil)
   ;; streaming encoder (am4.18): frames piped to ffmpeg -> compressed intermediate
   (want-encoder t)
   (enc-proc nil) (enc-stream nil) (enc-fifo nil) (intermediate nil) (enc-fps 30)
   (done nil) (error nil) (n-empty 0))
 
 (defvar *cap* nil)
+
+;;; ------------------------------------------------------------------
+;;; Pause/resume (green-screen-8ok). SIGUSR1 toggles: while paused we drop frames
+;;; and, on resume, shift record-start forward by the paused span so the saved
+;;; timeline is gapless and the paused time doesn't count against the duration cap.
+
+(defvar *record-cap* nil "The capture currently recording, for the SIGUSR1 toggle.")
+(defvar *sigusr1-installed* nil)
+
+(defun %toggle-pause ()
+  "Flip the active recording's pause state (SIGUSR1 handler)."
+  (let ((cap *record-cap*))
+    (when (and cap (capture-record-start cap))
+      (let ((now (get-internal-real-time)))
+        (if (capture-paused cap)
+            (progn                       ; resume: shift the clock past the pause
+              (when (capture-pause-start cap)
+                (incf (capture-record-start cap) (- now (capture-pause-start cap)))
+                (setf (capture-record-last cap) now))
+              (setf (capture-paused cap) nil (capture-pause-start cap) nil)
+              (format t "~&  [pw] resumed~%") (finish-output))
+            (progn                       ; pause
+              (setf (capture-paused cap) t (capture-pause-start cap) now)
+              (format t "~&  [pw] paused (SIGUSR1 to resume)~%") (finish-output)))))))
+
+(defun ensure-pause-handler ()
+  "Install the SIGUSR1 pause toggle once."
+  (unless *sigusr1-installed*
+    (sb-sys:enable-interrupt sb-unix:sigusr1
+                             (lambda (sig info ctx) (declare (ignore sig info ctx))
+                               (%toggle-pause)))
+    (setf *sigusr1-installed* t)))
 
 ;;; ------------------------------------------------------------------
 ;;; Parse a fixated Format object POD -> width, height, video-format.
@@ -281,6 +316,11 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
                     (/ internal-time-units-per-second
                        (float (max 1 (capture-record-min-dt cap)) 1.0))
                     (/ dur-units internal-time-units-per-second 1.0)))))
+    ;; Paused: drop the frame (no save, no deadline check -- paused time is
+    ;; excluded; record-start is shifted forward on resume).
+    (when (capture-paused cap)
+      (pw-stream-queue-buffer stream b)
+      (return-from %record-frame))
     (let ((deadline (+ (capture-record-start cap) (capture-record-duration cap))))
      (cond
       ;; safety caps: the max duration elapsed, or the frame backstop was hit
@@ -484,7 +524,13 @@ Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
                               (round (/ internal-time-units-per-second (max 1 max-fps)))))
            ;; Parallel audio recorder (best-effort) spanning the capture window.
            (audio-handle (when audio (takesy/audio:start-audio dir audio))))
-      (%run-and-teardown mloop ctx stream node-id cap)
+      ;; SIGUSR1 pauses/resumes this capture (kill -USR1 <pid>).
+      (ensure-pause-handler)
+      (setf *record-cap* cap)
+      (format t "  [pw] pause/resume: kill -USR1 ~D~%" (sb-unix:unix-getpid))
+      (unwind-protect
+           (%run-and-teardown mloop ctx stream node-id cap)
+        (setf *record-cap* nil))
       (let ((recording
               (list :width (capture-width cap) :height (capture-height cap)
                     :stride (capture-stride cap) :format (capture-format cap)

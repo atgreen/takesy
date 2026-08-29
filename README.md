@@ -28,6 +28,7 @@ into a finished mp4. You just record; takesy directs the shot.
 - **Trim idle time** — cut dead stretches (no screen change) to tighten long demos.
 - **Webcam inset** — composite a webcam clip as a circle-cropped picture-in-picture.
 - **Countdown** — a 3-2-1 before recording starts, so you can get ready.
+- **Pause / resume** — `kill -USR1 <pid>` toggles capture; paused time is cut, timeline stays gapless.
 - **Audio** — optionally record desktop sound, your mic, or both, muxed into the mp4.
 - **Capture once, render many** — record once, then re-render with different
   framing, background, or cursor without re-recording.
