@@ -391,10 +391,15 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
                                (float (session-height session) 1.0))
                             bcy)))
               (when (> z 1.02)              ; skip groups too spread out to zoom
-                (push (frame (- g-start lead) 1.0 0.5 0.5) kfs)  ; ease in
-                (push (frame g-start z cx cy) kfs)               ; hold, fit
-                (push (frame g-end   z cx cy) kfs)
-                (push (frame (+ g-end tail) 1.0 0.5 0.5) kfs)))))) ; ease out
+                ;; Never begin the zoom before LEAD, so the clip always opens on
+                ;; the whole region and eases in (activity that starts at t=0 must
+                ;; still show a wide first frame).
+                (let* ((zstart (max g-start lead))
+                       (zend   (max g-end zstart)))
+                  (push (frame (- zstart lead) 1.0 0.5 0.5) kfs)  ; ease in (wide)
+                  (push (frame zstart z cx cy) kfs)               ; hold, fit
+                  (push (frame zend   z cx cy) kfs)
+                  (push (frame (+ zend tail) 1.0 0.5 0.5) kfs))))))) ; ease out
       (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
       (%clean-timeline (nreverse kfs)))))
 
