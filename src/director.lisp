@@ -32,7 +32,7 @@
            #:activity-segment-n-clicks #:activity-segment-n-keys
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
-           #:*zoom-level* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
+           #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -267,6 +267,10 @@ Each qualifying dwell yields a segment focused on the mean dwell position."
 ;;; bracketed by wide frames at t=0 and the session end.
 
 (defparameter *zoom-level* 1.8 "Punch-in zoom factor for activity. REPL-tunable.")
+(defparameter *zoom-min* nil
+  "When set, a minimum zoom to force on detected activity even if it's too spread
+out for the fit to punch in (e.g. a full-screen app), centred on the cursor's
+working spot. NIL = only the smart damage-fit zoom. REPL-tunable.")
 (defparameter *zoom-lead*  0.5 "Seconds to begin zooming in before a segment.")
 (defparameter *zoom-tail*  0.8 "Seconds to stay zoomed after a segment before easing out.")
 (defparameter *zoom-merge-gap* 2.5
@@ -346,6 +350,7 @@ meets the opening frame), keep the more-zoomed one so activity wins."
 
 (defun schedule-zooms (session segments
                        &key (zoom *zoom-level*) (lead *zoom-lead*) (tail *zoom-tail*)
+                            (zoom-min *zoom-min*)
                             (padding 0.04) (corner 0.09)
                             (shadow-blur 0.03) (shadow-alpha 0.5)
                             (bg '(0.11 0.12 0.15)))
@@ -368,10 +373,23 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
           ;; Fit the zoom to ALL activity (cursor + screen changes) across the
           ;; whole group, so nothing that moves in that window gets cropped.
           (multiple-value-bind (x0 y0 x1 y1) (%activity-bbox session g-start g-end)
-            (let* ((cx (if x0 (* 0.5 (+ x0 x1)) 0.5))
-                   (cy (if y0 (* 0.5 (+ y0 y1)) 0.5))
-                   (z  (if x0 (%fit-zoom (- x1 x0) (- y1 y0) zoom *zoom-fit-margin*)
-                           zoom)))
+            (let* ((bcx (if x0 (* 0.5 (+ x0 x1)) 0.5))
+                   (bcy (if y0 (* 0.5 (+ y0 y1)) 0.5))
+                   (zfit (if x0 (%fit-zoom (- x1 x0) (- y1 y0) zoom *zoom-fit-margin*)
+                             zoom))
+                   ;; ZOOM-MIN forces a punch-in even when activity is too spread
+                   ;; out to fit (e.g. a full-screen app), centred on where the
+                   ;; cursor is working (the dwell focus) rather than the wide bbox.
+                   (force (and zoom-min (> zoom-min zfit)))
+                   (z   (if force zoom-min zfit))
+                   (cx  (if force
+                            (/ (/ (reduce #'+ g :key #'activity-segment-focus-x) (length g))
+                               (float (session-width session) 1.0))
+                            bcx))
+                   (cy  (if force
+                            (/ (/ (reduce #'+ g :key #'activity-segment-focus-y) (length g))
+                               (float (session-height session) 1.0))
+                            bcy)))
               (when (> z 1.02)              ; skip groups too spread out to zoom
                 (push (frame (- g-start lead) 1.0 0.5 0.5) kfs)  ; ease in
                 (push (frame g-start z cx cy) kfs)               ; hold, fit
@@ -381,7 +399,7 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
       (%clean-timeline (nreverse kfs)))))
 
 (defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
-                                   (zoom *zoom-level*)
+                                   (zoom *zoom-level*) (zoom-min *zoom-min*)
                                    (lead *zoom-lead*) (tail *zoom-tail*)
                                    (padding 0.04) (corner 0.09)
                                    (shadow-blur 0.03) (shadow-alpha 0.5)
@@ -397,7 +415,7 @@ the session has any, else dwell)."
                     (:auto   (if (session-events session)
                                  (detect-activity session :gap gap)
                                  (detect-dwell-activity session))))
-                  :zoom zoom :lead lead :tail tail
+                  :zoom zoom :zoom-min zoom-min :lead lead :tail tail
                   :padding padding :corner corner
                   :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg))
 

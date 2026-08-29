@@ -142,6 +142,7 @@ Dial the auto-zoom and cursor feel to taste:
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--zoom F` | punch-in zoom factor for activity | `1.8` |
+| `--zoom-min F` | force at least this zoom on detected activity even when it's too spread out to auto-fit (e.g. full-screen apps); centers on the cursor | off |
 | `--zoom-merge-gap S` | idle gap (s) below which the zoom pans between spots instead of zooming out and back in | `2.5` |
 | `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher is snappier with less lag | `30.0` |
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.4` |
