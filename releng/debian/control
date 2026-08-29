@@ -1,0 +1,34 @@
+Source: takesy
+Section: video
+Priority: optional
+Maintainer: Anthony Green <green@moxielogic.com>
+Build-Depends: debhelper-compat (= 13),
+               sbcl,
+               gcc,
+               make,
+               libfixposix-dev
+Standards-Version: 4.6.2
+Homepage: https://github.com/atgreen/takesy
+Vcs-Git: https://github.com/atgreen/takesy.git
+Vcs-Browser: https://github.com/atgreen/takesy
+Rules-Requires-Root: no
+
+Package: takesy
+Architecture: amd64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         ffmpeg,
+         libfixposix4 | libfixposix3,
+         libpipewire-0.3-0,
+         libegl1,
+         libgl1
+Recommends: xdg-desktop-portal, pipewire-bin
+Suggests: pipewire-pulse | pulseaudio-utils
+Description: screen recorder for modern Linux desktops (Wayland & X11)
+ takesy records your screen and turns it into a polished screencast: it
+ automatically zooms in on wherever you're working, smooths the cursor
+ motion, and composites the result -- padded background, rounded corners,
+ drop shadow -- into a finished mp4 or GIF.
+ .
+ Capture uses xdg-desktop-portal and PipeWire; the compositor runs on the
+ GPU via EGL/OpenGL. ffmpeg does the encoding.

@@ -1,0 +1,486 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (dry-run, e.g. 1.0.0)'
+        required: true
+        default: '0.0.0'
+
+jobs:
+  # ========================================
+  # Resolve the version from the tag (or dry-run input)
+  # ========================================
+  extract-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ========================================
+  # Fetch Lisp dependencies + collect their licenses (once)
+  # ========================================
+  fetch-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ocicl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sbcl
+          gh release download --repo ocicl/ocicl --pattern '*_amd64.deb' --dir /tmp
+          sudo dpkg -i /tmp/ocicl_*_amd64.deb
+          ocicl setup > ~/.sbclrc
+
+      - name: Fetch Lisp dependencies
+        run: ocicl install
+
+      - name: Collect vendored-dependency licenses
+        run: make licenses
+
+      - name: Upload ocicl directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: ocicl-deps
+          path: ocicl
+          retention-days: 1
+
+      - name: Upload license notices
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenses
+          path: OPEN-SOURCE-NOTICES.txt
+          retention-days: 1
+
+  # ========================================
+  # Build the RPM (Fedora)
+  # ========================================
+  build-rpm:
+    needs: [fetch-deps, extract-version]
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download ocicl dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: ocicl-deps
+          path: ocicl
+
+      - name: Download license notices
+        uses: actions/download-artifact@v4
+        with:
+          name: licenses
+          path: .
+
+      - name: Install build dependencies
+        run: dnf install -y rpm-build rpmdevtools rpm-sign sbcl gcc make libfixposix-devel
+
+      - name: Setup rpmbuild tree
+        run: rpmdev-setuptree
+
+      - name: Remove .git
+        run: rm -rf .git
+
+      - name: Create source tarball
+        run: |
+          cd ..
+          tar czf ~/rpmbuild/SOURCES/takesy-${VERSION}.tar.gz \
+            --transform "s,^takesy,takesy-${VERSION}," takesy
+
+      - name: Set spec version
+        run: |
+          sed -i "s/^Version:.*/Version:        ${VERSION}/" releng/takesy.spec
+          cp releng/takesy.spec ~/rpmbuild/SPECS/
+
+      - name: Build RPM and SRPM
+        run: |
+          cd ~/rpmbuild/SPECS
+          rpmbuild -ba takesy.spec
+
+      - name: Sign RPMs
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.RPM_GPG_PRIVATE_KEY != '' }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          echo "${RPM_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          GPG_NAME=$(gpg --list-secret-keys --with-colons | awk -F: '/^uid/{print $10; exit}')
+          echo "%_signature gpg" > ~/.rpmmacros
+          echo "%_gpg_name ${GPG_NAME}" >> ~/.rpmmacros
+          rpmsign --addsign ~/rpmbuild/RPMS/x86_64/*.rpm
+          rpmsign --addsign ~/rpmbuild/SRPMS/*.src.rpm || true
+          gpg --export --armor "${GPG_NAME}" | rpm --import -
+          rpm --checksig ~/rpmbuild/RPMS/x86_64/*.rpm
+
+      - name: Copy packages to workspace
+        run: |
+          cp ~/rpmbuild/RPMS/x86_64/*.rpm "${GITHUB_WORKSPACE}/" || true
+          cp ~/rpmbuild/SRPMS/*.src.rpm "${GITHUB_WORKSPACE}/" || true
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-packages
+          path: ./*.rpm
+
+  # ========================================
+  # Build the DEB (Debian)
+  # ========================================
+  build-deb:
+    needs: [fetch-deps, extract-version]
+    runs-on: ubuntu-latest
+    container:
+      image: debian:stable
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download ocicl dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: ocicl-deps
+          path: ocicl
+
+      - name: Download license notices
+        uses: actions/download-artifact@v4
+        with:
+          name: licenses
+          path: .
+
+      - name: Remove .git
+        run: rm -rf .git
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y debhelper devscripts sbcl gcc make libfixposix-dev gpg debsigs
+
+      - name: Set changelog version
+        run: |
+          sed -i "s/^takesy (.*)/takesy (${VERSION}-1) unstable; urgency=medium/" releng/debian/changelog
+
+      - name: Build DEB
+        run: |
+          ln -s releng/debian debian
+          dpkg-buildpackage -uc -us
+
+      - name: Sign DEB
+        env:
+          DEB_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.DEB_GPG_PRIVATE_KEY != '' }}
+        run: |
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" > ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" > ~/.gnupg/gpg.conf
+          echo "${DEB_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          GPG_KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')
+          for deb in ../*.deb; do
+            debsigs --sign=origin -k "${GPG_KEYID}" "${deb}"
+          done
+
+      - name: Copy packages to workspace
+        run: |
+          cp ../*.deb . 2>/dev/null || true
+          cp ../*.dsc . 2>/dev/null || true
+          cp ../*.buildinfo . 2>/dev/null || true
+          cp ../*.changes . 2>/dev/null || true
+
+      - name: Upload DEB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-packages
+          path: |
+            ./*.deb
+            ./*.dsc
+            ./*.buildinfo
+            ./*.changes
+
+  # ========================================
+  # Publish the GitHub release (notes from CHANGELOG.md)
+  # ========================================
+  release:
+    if: ${{ github.event_name == 'push' }}
+    needs: [build-rpm, build-deb, extract-version]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Extract release notes from CHANGELOG
+        run: |
+          awk -v hdr="## [${VERSION}]" '
+            index($0, hdr) == 1 { flag=1; next }
+            /^## \[/ || /^\[[^]]+\]:/ { if (flag) exit }
+            flag { print }
+          ' CHANGELOG.md > RELEASE-NOTES.md
+          if [ ! -s RELEASE-NOTES.md ]; then
+            echo "Release ${VERSION}" > RELEASE-NOTES.md
+          fi
+          echo "---- release notes ----"; cat RELEASE-NOTES.md
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name '*.rpm' -o -name '*.deb' \) -exec sha256sum {} \; \
+            | sed 's|  \./[^/]*/|  |' > ../checksums.sha256
+          cat ../checksums.sha256
+
+      - name: Create GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          bodyFile: RELEASE-NOTES.md
+          artifacts: |
+            artifacts/rpm-packages/*.rpm
+            artifacts/deb-packages/*.deb
+            checksums.sha256
+          allowUpdates: true
+
+  # ========================================
+  # Build RPM repository metadata
+  # ========================================
+  build-rpm-repo:
+    needs: [release, extract-version]
+    runs-on: ubuntu-latest
+    env:
+      TAG: v${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install createrepo_c
+        run: sudo apt-get update && sudo apt-get install -y createrepo-c
+
+      - name: Download RPM assets from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/rpms
+          gh release download "${TAG}" --repo "${{ github.repository }}" --pattern '*.rpm' --dir /tmp/rpms --skip-existing
+          ls -lh /tmp/rpms/
+
+      - name: Build repodata
+        run: createrepo_c /tmp/rpms
+
+      - name: Rewrite package locations to release asset URLs
+        run: |
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          cd /tmp/rpms/repodata
+          gunzip -f *-primary.xml.gz
+          PRIMARY=$(ls *-primary.xml)
+          sed -i "s|<location href=\"\([^\"]*\.rpm\)\"|<location href=\"${BASE}/\1\"|g" "${PRIMARY}"
+          gzip -9 "${PRIMARY}"
+          cd /tmp/rpms
+          REPODATA=repodata
+          cat > "${REPODATA}/repomd.xml" <<'XMLHEADER'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <repomd xmlns="http://linux.duke.edu/metadata/repo">
+          XMLHEADER
+          for gz in "${REPODATA}"/*.xml.gz; do
+            fname="$(basename "${gz}")"
+            type="$(echo "${fname}" | sed 's/.*-\([a-z_]*\)\.xml\.gz/\1/')"
+            checksum="$(sha256sum "${gz}" | awk '{print $1}')"
+            size="$(stat -c%s "${gz}")"
+            open_file="${gz%.gz}"
+            gunzip -k -f "${gz}"
+            open_checksum="$(sha256sum "${open_file}" | awk '{print $1}')"
+            open_size="$(stat -c%s "${open_file}")"
+            rm -f "${open_file}"
+            cat >> "${REPODATA}/repomd.xml" <<XMLDATA
+            <data type="${type}">
+              <checksum type="sha256">${checksum}</checksum>
+              <open-checksum type="sha256">${open_checksum}</open-checksum>
+              <location href="repodata/${fname}"/>
+              <size>${size}</size>
+              <open-size>${open_size}</open-size>
+            </data>
+          XMLDATA
+          done
+          echo "</repomd>" >> "${REPODATA}/repomd.xml"
+          sed -i 's/^          //' "${REPODATA}/repomd.xml"
+
+      - name: Sign repomd.xml and export public key
+        env:
+          RPM_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.RPM_GPG_PRIVATE_KEY != '' }}
+        run: |
+          echo "${RPM_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          gpg --batch --detach-sign --armor /tmp/rpms/repodata/repomd.xml
+          gpg --batch --export --armor > /tmp/rpms/RPM-GPG-KEY-takesy
+
+      - name: Upload RPM repo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-repo
+          path: /tmp/rpms/repodata/
+
+      - name: Upload RPM GPG key
+        if: ${{ hashFiles('/tmp/rpms/RPM-GPG-KEY-takesy') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-repo-key
+          path: /tmp/rpms/RPM-GPG-KEY-takesy
+
+  # ========================================
+  # Build DEB repository metadata
+  # ========================================
+  build-deb-repo:
+    needs: [release, extract-version]
+    runs-on: ubuntu-latest
+    env:
+      TAG: v${{ needs.extract-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install APT repo tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev gpg
+
+      - name: Download DEB assets from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/debs
+          gh release download "${TAG}" --repo "${{ github.repository }}" --pattern '*.deb' --dir /tmp/debs --skip-existing
+          ls -lh /tmp/debs/
+
+      - name: Import GPG key
+        env:
+          DEB_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.DEB_GPG_PRIVATE_KEY != '' }}
+        run: |
+          echo "${DEB_GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+          gpg --batch --export --armor > /tmp/debs/takesy-archive-keyring.gpg
+
+      - name: Build APT repository
+        run: |
+          REPO_DIR=/tmp/apt-repo
+          mkdir -p "${REPO_DIR}/pool/main"
+          mkdir -p "${REPO_DIR}/dists/stable/main/binary-amd64"
+          cp /tmp/debs/*.deb "${REPO_DIR}/pool/main/"
+          cd "${REPO_DIR}"
+          dpkg-scanpackages pool/main > dists/stable/main/binary-amd64/Packages
+          gzip -9c dists/stable/main/binary-amd64/Packages > dists/stable/main/binary-amd64/Packages.gz
+          cd dists/stable
+          cat > Release <<EOF
+          Origin: takesy
+          Label: takesy
+          Suite: stable
+          Codename: stable
+          Date: $(date -Ru)
+          Architectures: amd64
+          Components: main
+          Description: takesy APT repository
+          EOF
+          sed -i 's/^          //' Release
+          {
+            echo "MD5Sum:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
+              printf " %s %16d %s\n" "$(md5sum "$f" | awk '{print $1}')" "$(stat -c%s "$f")" "$f"
+            done
+            echo "SHA256:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz; do
+              printf " %s %16d %s\n" "$(sha256sum "$f" | awk '{print $1}')" "$(stat -c%s "$f")" "$f"
+            done
+          } >> Release
+
+      - name: Sign Release file
+        env:
+          DEB_GPG_PRIVATE_KEY: ${{ secrets.RPM_GPG_PRIVATE_KEY }}
+        if: ${{ env.DEB_GPG_PRIVATE_KEY != '' }}
+        run: |
+          cd /tmp/apt-repo/dists/stable
+          gpg --batch --yes --armor --detach-sign -o Release.gpg Release
+          gpg --batch --yes --armor --clearsign -o InRelease Release
+
+      - name: Copy keyring into repo
+        run: |
+          if [ -f /tmp/debs/takesy-archive-keyring.gpg ]; then
+            cp /tmp/debs/takesy-archive-keyring.gpg /tmp/apt-repo/
+          fi
+
+      - name: Upload DEB repo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-repo
+          path: /tmp/apt-repo/
+
+  # ========================================
+  # Deploy package repos + landing page to GitHub Pages
+  # ========================================
+  deploy-pages:
+    needs: [build-rpm-repo, build-deb-repo]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download RPM repo artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-repo
+          path: docs/rpm-repo/repodata
+
+      - name: Download RPM GPG key
+        uses: actions/download-artifact@v4
+        with:
+          name: rpm-repo-key
+          path: docs/rpm-repo
+        continue-on-error: true
+
+      - name: Download DEB repo artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-repo
+          path: docs/deb-repo
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

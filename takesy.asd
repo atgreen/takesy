@@ -4,7 +4,10 @@
 
 (asdf:defsystem "takesy"
   :description "A screen recorder for modern Linux desktops (Wayland & X11), via xdg-desktop-portal + PipeWire."
-  :depends-on ("takesy/dbus-fd" "takesy/pipewire"))
+  :depends-on ("takesy/cli")
+  :build-operation "program-op"
+  :build-pathname "takesy"
+  :entry-point "takesy/cli:main")
 
 (asdf:defsystem "takesy/pipewire"
   :description "Pure-Lisp CFFI bindings to libpipewire-0.3 for frame capture."
@@ -73,7 +76,7 @@
                 :components ((:file "record")))))
 
 (asdf:defsystem "takesy/cli"
-  :description "takesy command-line entry point (build the executable with build.lisp)."
+  :description "takesy command-line entry point (build the executable with `make`)."
   :depends-on ("takesy/record")
   :serial t
   :components ((:module "src"

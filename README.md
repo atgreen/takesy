@@ -1,6 +1,8 @@
 # takesy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/atgreen/takesy)](https://github.com/atgreen/takesy/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](https://github.com/atgreen/takesy/releases)
 
 > A screen recorder for modern Linux desktops (Wayland & X11).
 
@@ -40,10 +42,41 @@ into a finished mp4. You just record; takesy directs the shot.
 - [SBCL](https://www.sbcl.org/) and [ocicl](https://github.com/ocicl/ocicl) to
   build (dependencies resolve automatically)
 
+## Install
+
+Prebuilt x86_64 packages are published for each release. The packages are
+GPG-signed and pull in `ffmpeg` and the PipeWire/EGL runtime libraries takesy
+needs.
+
+### Fedora / RHEL (RPM)
+
+Add the takesy repository and install:
+
+```sh
+sudo dnf config-manager addrepo --from-repofile=https://atgreen.github.io/takesy/rpm-repo/takesy.repo
+sudo dnf install takesy
+```
+
+The signing key is imported automatically by dnf on first install.
+
+### Debian / Ubuntu (DEB)
+
+Add the takesy repository and install:
+
+```sh
+curl -fsSL https://atgreen.github.io/takesy/deb-repo/takesy-archive-keyring.gpg | sudo tee /usr/share/keyrings/takesy-archive-keyring.asc > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/takesy-archive-keyring.asc] https://atgreen.github.io/takesy/deb-repo stable main" | sudo tee /etc/apt/sources.list.d/takesy.list
+sudo apt update
+sudo apt install takesy
+```
+
+Individual `.rpm` / `.deb` files are also attached to each
+[GitHub release](https://github.com/atgreen/takesy/releases/latest).
+
 ## Build
 
 ```sh
-make                # -> ./takesy   (or: sbcl --script build.lisp)
+make                # -> ./takesy
 make install        # copies takesy to ~/.local/bin
 ```
 

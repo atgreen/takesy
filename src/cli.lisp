@@ -219,7 +219,8 @@ REPL-callable."
       (t (cmd-record args)))))                          ; default: just record
 
 ;;; ------------------------------------------------------------------
-;;; Executable entry point (set as :toplevel by build.lisp).
+;;; Executable entry point (the :entry-point of the "takesy" system; `make`
+;;; dumps the image via asdf:make).
 
 (defun main ()
   (handler-case

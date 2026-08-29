@@ -6,7 +6,7 @@
 # Spike output
 /scratch/
 *.png
-# Built executable (produced by build.lisp)
+# Built executable (produced by `make` / asdf:make)
 /takesy
 # Video output
 *.mp4
@@ -16,3 +16,5 @@
 .#*
 # Beads runtime lock (dolt-backed data is shared via bd sync, not git)
 .beads.gate.lock
+# Generated license notices (built in CI via ocicl collect-licenses)
+/OPEN-SOURCE-NOTICES.txt

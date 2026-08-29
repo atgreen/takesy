@@ -6,17 +6,42 @@ SBCL   ?= sbcl
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
-SOURCES := build.lisp takesy.asd $(wildcard src/*.lisp)
+SOURCES := takesy.asd $(wildcard src/*.lisp)
+
+# ASDF source registry: this repo, plus the ocicl/ tree that `ocicl install`
+# populates (and CI restores). Lets the build find every dependency.
+REGISTRY := (asdf:initialize-source-registry (list :source-registry :inherit-configuration (list :directory (uiop:getcwd)) (list :tree (merge-pathnames "ocicl/" (uiop:getcwd)))))
 
 .PHONY: all build record install uninstall clean
 
 all: takesy
 
-## takesy: build the standalone executable
+## takesy: build the standalone executable (asdf:make dumps it via :build-operation)
 takesy: $(SOURCES)
-	$(SBCL) --script build.lisp
+	$(SBCL) --non-interactive \
+	        --eval "(require :asdf)" \
+	        --eval '$(REGISTRY)' \
+	        --eval "(asdf:make :takesy)"
 
 build: takesy
+
+## OPEN-SOURCE-NOTICES.txt: license notices for every vendored dependency
+OPEN-SOURCE-NOTICES.txt: ocicl.csv
+	@echo "Generating $@ ..."
+	@echo "================================================================================" > $@
+	@echo "takesy OPEN SOURCE NOTICES" >> $@
+	@echo "================================================================================" >> $@
+	@echo "" >> $@
+	@echo "takesy is licensed under the MIT License." >> $@
+	@echo "Copyright (C) 2026 Anthony Green <green@moxielogic.com>" >> $@
+	@echo "" >> $@
+	@echo "It is built with the open source Common Lisp libraries below; their" >> $@
+	@echo "license notices follow." >> $@
+	@echo "" >> $@
+	@ocicl collect-licenses 2>/dev/null >> $@
+
+## licenses: (re)generate the vendored-dependency license notices
+licenses: OPEN-SOURCE-NOTICES.txt
 
 ## record: build (if needed) and start recording
 record: takesy
@@ -31,7 +56,7 @@ install: takesy
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/takesy
 
-## clean: remove the executable and the compiled-source cache
+## clean: remove build outputs and the compiled-source cache
 clean:
-	rm -f takesy
+	rm -f takesy OPEN-SOURCE-NOTICES.txt
 	rm -rf $(HOME)/.cache/common-lisp/*$(CURDIR)

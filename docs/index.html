@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>takesy package repositories</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 46rem; margin: 3rem auto; padding: 0 1rem; color: #222; }
+  h1 { margin-bottom: .2rem; }
+  code, pre { background: #f4f4f4; border-radius: 4px; }
+  pre { padding: 1rem; overflow-x: auto; }
+  code { padding: .1rem .3rem; }
+  a { color: #0b62c4; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #16181d; color: #d7dae0; }
+    code, pre { background: #21252b; }
+    a { color: #6cb0ff; }
+  }
+</style>
+
+<h1>takesy</h1>
+<p>A screen recorder for modern Linux desktops (Wayland &amp; X11). See the
+<a href="https://github.com/atgreen/takesy">project on GitHub</a>.</p>
+
+<h2>Fedora / RHEL (RPM)</h2>
+<pre>sudo dnf config-manager addrepo --from-repofile=https://atgreen.github.io/takesy/rpm-repo/takesy.repo
+sudo dnf install takesy</pre>
+
+<h2>Debian / Ubuntu (DEB)</h2>
+<pre>curl -fsSL https://atgreen.github.io/takesy/deb-repo/takesy-archive-keyring.gpg | sudo tee /usr/share/keyrings/takesy-archive-keyring.asc > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/takesy-archive-keyring.asc] https://atgreen.github.io/takesy/deb-repo stable main" | sudo tee /etc/apt/sources.list.d/takesy.list
+sudo apt update
+sudo apt install takesy</pre>
+
+<p>Packages are GPG-signed. Individual <code>.rpm</code> / <code>.deb</code> files
+are also attached to each <a href="https://github.com/atgreen/takesy/releases">release</a>.</p>

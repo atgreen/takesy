@@ -1,0 +1,7 @@
+[takesy]
+name=takesy - screen recorder for modern Linux desktops
+baseurl=https://atgreen.github.io/takesy/rpm-repo
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://atgreen.github.io/takesy/rpm-repo/RPM-GPG-KEY-takesy

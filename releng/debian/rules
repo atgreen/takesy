@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Dependencies are vendored in ocicl/ (restored before the build).
+	make
+
+override_dh_auto_install:
+	mkdir -p debian/takesy/usr/bin
+	mkdir -p debian/takesy/usr/share/doc/takesy
+	install -m 0755 takesy debian/takesy/usr/bin/
+	install -m 0644 OPEN-SOURCE-NOTICES.txt debian/takesy/usr/share/doc/takesy/
+	install -m 0644 README.md debian/takesy/usr/share/doc/takesy/
+
+override_dh_auto_test:
+	# No test suite is vendored in the source tarball.
+
+override_dh_strip:
+	# Do not strip SBCL-based binaries -- it corrupts the embedded core.
+
+override_dh_dwz:
+	# dwz would likewise mangle the dumped core.
+
+override_dh_auto_clean:
+	rm -f takesy
+	dh_auto_clean
