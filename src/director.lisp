@@ -316,6 +316,19 @@ than MAX-RECT (scroll/global). Return (values x0 y0 x1 y1) in 0..1, or NIL."
                   (acc dx0 dy0) (acc dx1 dy1))))))))
     (when x0 (values (max 0.0 x0) (max 0.0 y0) (min 1.0 x1) (min 1.0 y1)))))
 
+(defun %damage-centroid (session t0 t1 &key (max-rect *damage-max-rect*))
+  "UV centroid of the localized screen changes (damage) in [T0,T1], excluding
+wide/global (scroll) rects. This is *where the screen is changing* -- the point a
+screencast should frame, which for typing/editing is the text, not the mouse.
+Return (values cx cy) or NIL when there is no localized damage."
+  (let ((sx 0.0) (sy 0.0) (n 0))
+    (dolist (d (session-damage session))
+      (destructuring-bind (dt x0 y0 x1 y1) d
+        (when (and (<= t0 dt t1)
+                   (<= (- x1 x0) max-rect) (<= (- y1 y0) max-rect))
+          (incf sx (* 0.5 (+ x0 x1))) (incf sy (* 0.5 (+ y0 y1))) (incf n))))
+    (when (plusp n) (values (/ sx n) (/ sy n)))))
+
 (defun %fit-zoom (bw bh max-zoom margin)
   "Largest zoom (<= MAX-ZOOM, >= 1) whose 1/zoom window still contains a BW x BH
 UV box with MARGIN to spare."
@@ -378,18 +391,15 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
                    (zfit (if x0 (%fit-zoom (- x1 x0) (- y1 y0) zoom *zoom-fit-margin*)
                              zoom))
                    ;; ZOOM-MIN forces a punch-in even when activity is too spread
-                   ;; out to fit (e.g. a full-screen app), centred on where the
-                   ;; cursor is working (the dwell focus) rather than the wide bbox.
+                   ;; out for the fit to zoom (e.g. a full-screen app).
                    (force (and zoom-min (> zoom-min zfit)))
-                   (z   (if force zoom-min zfit))
-                   (cx  (if force
-                            (/ (/ (reduce #'+ g :key #'activity-segment-focus-x) (length g))
-                               (float (session-width session) 1.0))
-                            bcx))
-                   (cy  (if force
-                            (/ (/ (reduce #'+ g :key #'activity-segment-focus-y) (length g))
-                               (float (session-height session) 1.0))
-                            bcy)))
+                   (z   (if force zoom-min zfit)))
+              ;; Centre on WHERE THE SCREEN IS CHANGING (localized damage) -- for
+              ;; typing/editing the mouse is idle elsewhere, so the cursor is the
+              ;; wrong focus. Fall back to the activity bbox centre when there's no
+              ;; localized damage (e.g. pure mouse movement).
+              (multiple-value-bind (dcx dcy) (%damage-centroid session g-start g-end)
+                (let ((cx (or dcx bcx)) (cy (or dcy bcy)))
               (when (> z 1.02)              ; skip groups too spread out to zoom
                 ;; Never begin the zoom before LEAD, so the clip always opens on
                 ;; the whole region and eases in (activity that starts at t=0 must
@@ -399,7 +409,7 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
                   (push (frame (- zstart lead) 1.0 0.5 0.5) kfs)  ; ease in (wide)
                   (push (frame zstart z cx cy) kfs)               ; hold, fit
                   (push (frame zend   z cx cy) kfs)
-                  (push (frame (+ zend tail) 1.0 0.5 0.5) kfs))))))) ; ease out
+                  (push (frame (+ zend tail) 1.0 0.5 0.5) kfs))))))))) ; ease out
       (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
       (%clean-timeline (nreverse kfs)))))
 
