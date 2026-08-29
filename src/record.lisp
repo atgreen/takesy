@@ -188,6 +188,15 @@ already covers >= MIN-COVER of the frame (nothing worth cropping)."
             (list (max 0.0 (- x0 margin)) (max 0.0 (- y0 margin))
                   (min 1.0 (+ x1 margin)) (min 1.0 (+ y1 margin))))))))
 
+(defun %region-uv (region fw fh)
+  "Convert REGION (list x y w h, source pixels) to a (x0 y0 x1 y1) source-UV crop,
+clamped to the frame."
+  (destructuring-bind (x y w h) region
+    (list (max 0.0 (/ (float x 1.0) fw))
+          (max 0.0 (/ (float y 1.0) fh))
+          (min 1.0 (/ (float (+ x w) 1.0) fw))
+          (min 1.0 (/ (float (+ y h) 1.0) fh)))))
+
 (defun %reshape-crop (crop fw fh tw th)
   "Reshape CROP (x0 y0 x1 y1 source UV) so its pixel aspect matches TW:TH, centered
 on the crop's centre and clamped to the frame. Used for social reframe (9:16, 1:1,
@@ -361,6 +370,7 @@ recording plist."
                                   (bg-blur nil)
                                   (ripples t)
                                   (aspect nil)
+                                  (region nil)
                                   (zoom dir:*zoom-level*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -383,11 +393,13 @@ different config. Return (values out n-frames)."
         (dir:*cursor-anticipate* cursor-anticipate)
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
         (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image)))))
-    (let* (;; Crop to the real content (trim empty desktop borders) -- everything
-           ;; downstream works in this cropped frame. ASPECT (cons w . h) reshapes
-           ;; that crop to a target output aspect (e.g. 9:16 vertical), centered on
-           ;; the content, so the whole pipeline reframes to it.
-           (crop0    (or (compute-content-bbox rec) '(0.0 0.0 1.0 1.0)))
+    (let* (;; Base framing: an explicit REGION (x y w h source px) if given, else
+           ;; auto-crop to the real content (trim empty desktop borders).
+           ;; Everything downstream works in this cropped frame. ASPECT (cons w . h)
+           ;; then reshapes it to a target output aspect (e.g. 9:16 vertical).
+           (crop0    (cond (region (%region-uv region (getf rec :width) (getf rec :height)))
+                           ((compute-content-bbox rec))
+                           (t '(0.0 0.0 1.0 1.0))))
            (crop     (if aspect
                          (%reshape-crop crop0 (getf rec :width) (getf rec :height)
                                         (car aspect) (cdr aspect))
@@ -433,6 +445,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (bg-blur nil)
                            (ripples t)
                            (aspect nil)
+                           (region nil)
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -448,7 +461,7 @@ re-rendered. Return (values out n-frames)."
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
-                          :aspect aspect
+                          :aspect aspect :region region
                           :zoom zoom :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate

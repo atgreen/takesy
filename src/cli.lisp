@@ -98,6 +98,20 @@ integers, or NIL when absent."
             (error "bad --aspect ~S (W and H must be positive)" str))
           (cons w h)))))
 
+(defun parse-region (str)
+  "Parse --region `X,Y,W,H` (source pixels) into a list (x y w h), or NIL."
+  (if (null str)
+      nil
+      (let ((parts (loop with start = 0
+                         for pos = (position #\, str :start start)
+                         collect (parse-integer str :start start :end pos)
+                         while pos do (setf start (1+ pos)))))
+        (unless (= (length parts) 4)
+          (error "bad --region ~S (use X,Y,W,H in pixels)" str))
+        (when (or (minusp (third parts)) (minusp (fourth parts)))
+          (error "bad --region ~S (W and H must be non-negative)" str))
+        parts)))
+
 ;;; ------------------------------------------------------------------
 ;;; Subcommands.
 
@@ -127,6 +141,7 @@ options:
                     overrides --bg
   --aspect W:H      reframe output to an aspect (e.g. 9:16 vertical, 1:1),
                     keeping the active region centered (default: content aspect)
+  --region X,Y,W,H  frame a fixed screen region (source px) instead of auto-crop
   --corner-radius F rounded-corner radius, fraction of content (default 0.09;
                     0 = square corners)
   --cursor PATH     draw a custom cursor image (png/...) instead of the arrow
@@ -167,6 +182,7 @@ option alist O, applying defaults. Shared by `record` and `render`."
                                (not (and v (member (string-downcase (string-trim " " v))
                                                    '("off" "no" "false" "0") :test #'string=))))
           :aspect            (parse-aspect (opt o "aspect" nil))
+          :region            (parse-region (opt o "region" nil))
           :corner            (opt-num o "corner-radius" 0.09)
           :cursor            (opt o "cursor" nil)
           :cursor-hotspot    (let ((s (opt o "cursor-hotspot" nil)))
