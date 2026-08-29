@@ -21,9 +21,15 @@ shot for you.
 - **Smoothed cursor** — a speed-adaptive spring that aims at your clicks (cutting
   the usual overshoot) yet stays responsive when you point at things.
 - **Polished compositing** — the screen inset on a padded background with rounded
-  corners and a soft drop shadow.
+  corners (optional) and a soft drop shadow.
+- **Custom cursor** — draw your own cursor image instead of the built-in arrow.
+- **Audio** — optionally record desktop sound, your mic, or both, muxed into the mp4.
+- **Capture once, render many** — record once, then re-render with different
+  framing, background, or cursor without re-recording.
 - **Click to stop** — record for as long as you like; finish with your desktop's
-  screencast Stop button.
+  screencast Stop button. Frames stream to a compressed intermediate during
+  capture and straight to the encoder on render, so long recordings stay small
+  on disk.
 - **One self-contained binary** — builds to a single `takesy` executable.
 
 ## Requirements
@@ -31,6 +37,7 @@ shot for you.
 - A modern Linux desktop (Wayland or X11) with `xdg-desktop-portal` + PipeWire
   (GNOME, KDE, or wlroots)
 - `ffmpeg` with an H.264 encoder (`libx264` or `libopenh264`)
+- `pactl` (PulseAudio/PipeWire) — only for `--audio`
 - [SBCL](https://www.sbcl.org/) and [ocicl](https://github.com/ocicl/ocicl) to
   build (dependencies resolve automatically)
 
@@ -46,6 +53,8 @@ make install        # copies takesy to ~/.local/bin
 ```sh
 takesy                                 # record; click Stop in the top bar to finish
 takesy --output talk.mp4 --duration 20
+takesy --audio both                    # record desktop sound + mic too
+takesy --cursor arrow.png              # use a custom cursor image
 takesy help
 ```
 
@@ -79,6 +88,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
 | `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |
 | `--cursor-size F` | cursor height as a fraction of the output height | `0.06` |
+| `--audio MODE` | record audio: `system` (desktop/monitor), `mic`, or `both` (mixed). Muxed into the mp4 as AAC; set at `capture`/`record` time | off |
 
 ### Direction tuning
 
@@ -93,13 +103,17 @@ Dial the auto-zoom and cursor feel to taste:
 
 ## How it works
 
-1. **Capture** — receives frames and the cursor position over
-   `xdg-desktop-portal` + PipeWire.
+1. **Capture** (`takesy capture`) — receives frames and the cursor position over
+   `xdg-desktop-portal` + PipeWire, streaming them to a compressed intermediate,
+   plus optional audio. Writes a self-contained recording dir.
 2. **Direct** — detects where you focused, plans eased auto-zoom keyframes fit to
    the active region, and smooths the cursor path.
-3. **Composite** (GPU) — renders the zoom, background, rounded corners, drop
-   shadow, and cursor overlay with EGL/OpenGL, then encodes to an mp4 via
-   `ffmpeg`.
+3. **Composite** (`takesy render`, GPU) — renders the zoom, background, rounded
+   corners, drop shadow, and cursor overlay with EGL/OpenGL, streaming frames
+   straight to `ffmpeg` (and muxing audio) — no large scratch files.
+
+`takesy` (or `takesy record`) runs all three in one shot; `capture` and `render`
+split them so one recording can be rendered many ways.
 
 ## License
 

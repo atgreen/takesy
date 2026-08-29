@@ -451,13 +451,16 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
 
 (defun record-frames (fd node-id &key (duration 30.0) (max-fps 30)
                                       (disk-budget nil)
+                                      (audio nil)
                                       (dir "/tmp/takesy-rec"))
   "Record from NODE-ID into DIR until the user ends the share (stream drops after
 streaming -- cb-state-changed quits the loop) or DURATION seconds elapse. Frames
 are full-res BGRx (~37MB each at 4K), so the number kept is bounded by DISK-BUDGET
 bytes and spread across the whole DURATION (the effective rate drops below MAX-FPS
 when needed) -- so a busy screen fills the clip, not the disk in a few seconds.
-Return a plist (:width :height :stride :format :fps :dir :frames)."
+AUDIO, when non-nil (:system | :mic | :both), records a parallel audio track over
+the same window (best-effort) and stores its path as :audio in the manifest.
+Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
   (ensure-directories-exist (concatenate 'string (string-right-trim "/" dir) "/"))
   ;; clear stale frames from a previous recording so disk use stays bounded
   (dolist (f (directory (merge-pathnames "frame-*.bgrx"
@@ -478,7 +481,9 @@ Return a plist (:width :height :stride :format :fps :dir :frames)."
                               (round (* duration internal-time-units-per-second))
                               :record-budget budget
                               :record-min-dt
-                              (round (/ internal-time-units-per-second (max 1 max-fps))))))
+                              (round (/ internal-time-units-per-second (max 1 max-fps)))))
+           ;; Parallel audio recorder (best-effort) spanning the capture window.
+           (audio-handle (when audio (takesy/audio:start-audio dir audio))))
       (%run-and-teardown mloop ctx stream node-id cap)
       (let ((recording
               (list :width (capture-width cap) :height (capture-height cap)
@@ -486,6 +491,9 @@ Return a plist (:width :height :stride :format :fps :dir :frames)."
                     :fps max-fps :dir (capture-record-dir cap)
                     :cursor-meta (capture-cursor-meta-seen cap)
                     :intermediate (capture-intermediate cap)  ; nil if raw fallback
+                    ;; stop-audio finalises the wav and validates it has data;
+                    ;; NIL when audio was off or produced nothing.
+                    :audio (when audio-handle (takesy/audio:stop-audio audio-handle))
                     :frames (nreverse (capture-frames cap)))))
         ;; Persist a manifest so the recording dir is self-contained and can be
         ;; reloaded later (load-recording) by the orchestrator / CLI.

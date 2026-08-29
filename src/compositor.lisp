@@ -595,23 +595,52 @@ bitrate scaled to resolution (~0.12 bits/pixel, screen content compresses well).
        (list "-b:v" (format nil "~D" bps) "-maxrate" (format nil "~D" (* 2 bps))
              "-bufsize" (format nil "~D" (* 2 bps)))))))
 
-(defun %encode-raw (raw width height fps path n)
-  "Encode the RAW rgba frame dump (N frames of WIDTHxHEIGHT) to an H.264 mp4."
-  (let ((encoder (pick-h264-encoder)))
-    (uiop:run-program
-     (append
-      (list "ffmpeg" "-y" "-loglevel" "error"
-            "-f" "rawvideo" "-pix_fmt" "rgba"
-            "-s" (format nil "~Dx~D" width height)
-            "-r" (format nil "~D" fps) "-i" raw
-            "-c:v" encoder)
-      (%quality-flags encoder width height fps)
-      (list "-pix_fmt" "yuv420p" "-movflags" "+faststart" path))
-     :output t :error-output t)
-    ;; the raw dump can be gigabytes (uncompressed RGBA); drop it once encoded.
-    (ignore-errors (delete-file raw))
-    (format t "  [enc] ~D frames @ ~Dfps (~A) -> ~A~%" n fps encoder path)
-    (values path n)))
+;;; Streaming encoder: pipe composited RGBA frames straight to ffmpeg's stdin so
+;;; long renders don't spill a huge raw dump. A 20-min 1080p@24 output would be
+;;; ~240 GB of raw RGBA on disk if buffered; streamed, peak scratch is ~zero.
+
+(defstruct (frame-encoder (:constructor %make-frame-encoder))
+  proc stream path encoder mux)
+
+(defun %open-frame-encoder (path width height fps &key audio)
+  "Launch ffmpeg reading rawvideo RGBA WxH from stdin, encoding H.264 to PATH
+(muxing AUDIO if given, trimmed to the shorter stream). Return a FRAME-ENCODER:
+write each frame's bytes to its STREAM, then %CLOSE-FRAME-ENCODER to finalize."
+  (let* ((encoder (pick-h264-encoder))
+         (mux     (and audio (probe-file audio)))
+         (proc (uiop:launch-program
+                (append
+                 (list "ffmpeg" "-y" "-loglevel" "error"
+                       "-f" "rawvideo" "-pix_fmt" "rgba"
+                       "-s" (format nil "~Dx~D" width height)
+                       "-r" (format nil "~D" fps) "-i" "pipe:0")
+                 (when mux (list "-i" (namestring mux)))
+                 (list "-c:v" encoder)
+                 (%quality-flags encoder width height fps)
+                 (when mux (list "-c:a" "aac" "-b:a" "192k" "-shortest"))
+                 (list "-pix_fmt" "yuv420p" "-movflags" "+faststart" path))
+                ;; stderr discarded so ffmpeg never blocks on an undrained pipe;
+                ;; our writes get natural backpressure from ffmpeg reading stdin.
+                :input :stream :output nil :error-output nil)))
+    (%make-frame-encoder :proc proc :stream (uiop:process-info-input proc)
+                         :path path :encoder encoder :mux mux)))
+
+(defun %write-frame (enc bytes)
+  "Write one RGBA frame BYTES to the encoder's stdin."
+  (write-sequence bytes (frame-encoder-stream enc)))
+
+(defun %close-frame-encoder (enc n fps)
+  "Flush + close the encoder's stdin (EOF), wait for ffmpeg, and report. Signal if
+ffmpeg exits non-zero so a failed encode isn't silently reported as success."
+  (ignore-errors (finish-output (frame-encoder-stream enc)))
+  (ignore-errors (close (frame-encoder-stream enc)))     ; EOF -> ffmpeg finalizes
+  (let ((code (uiop:wait-process (frame-encoder-proc enc))))
+    (unless (eql code 0)
+      (error "ffmpeg encoder exited ~A writing ~A" code (frame-encoder-path enc))))
+  (format t "  [enc] ~D frames @ ~Dfps (~A, streamed)~:[~; +audio~] -> ~A~%"
+          n fps (frame-encoder-encoder enc) (frame-encoder-mux enc)
+          (frame-encoder-path enc))
+  (values (frame-encoder-path enc) n))
 
 (defun render-timeline (keyframes source width height
                         &key (fps 30) (duration 3.0) (path "/tmp/gs-comp.mp4")
@@ -619,25 +648,25 @@ bitrate scaled to resolution (~0.12 bits/pixel, screen content compresses well).
   "Animate a still SOURCE (bytes, WxH; SOURCE-FORMAT :rgba or :bgra) through the
 compose shader driven by KEYFRAMES over DURATION seconds at FPS, encode to an
 H.264 mp4 at PATH. Return (values path n-frames). WIDTH/HEIGHT even (yuv420p)."
-  (let* ((n   (max 1 (round (* fps duration))))
-         (raw (format nil "~A.raw" path)))
+  (let* ((n   (max 1 (round (* fps duration)))))
     (egl:with-headless-gl (ctx width height)
       (declare (ignore ctx))
       (make-fbo width height)
       (let ((program (make-program +vs-passthrough+ +fs-compose+))
             (vao     (make-fullscreen-quad))
             (tex     (make-texture-rgba source width height :source-format source-format)))
-        (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
-                               :if-exists :supersede)
-          (dotimes (i n)
-            (let* ((tsec  (if (= n 1) 0.0 (* duration (/ i (float (1- n) 1.0)))))
-                   (frame (kf:sample-timeline keyframes tsec)))
-              (gl:clear-color 0.0 0.0 0.0 1.0)
-              (gl:clear :color-buffer-bit)
-              (draw-compose program vao tex frame width height)
-              (gl:finish)
-              (write-sequence (read-rgba width height) s))))
-        (%encode-raw raw width height fps path n)))))
+        (let ((enc (%open-frame-encoder path width height fps)))
+          (unwind-protect
+               (dotimes (i n)
+                 (let* ((tsec  (if (= n 1) 0.0 (* duration (/ i (float (1- n) 1.0)))))
+                        (frame (kf:sample-timeline keyframes tsec)))
+                   (gl:clear-color 0.0 0.0 0.0 1.0)
+                   (gl:clear :color-buffer-bit)
+                   (draw-compose program vao tex frame width height)
+                   (gl:finish)
+                   (%write-frame enc (read-rgba width height))))
+            (%close-frame-encoder enc n fps))
+          (values path n))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Cursor overlay (am4.9). METADATA capture hides the HW cursor, so we draw one
@@ -765,6 +794,7 @@ image) placed at framebuffer (PX,PY), sized W x H px, clipped to the content rec
                                    (time-fn nil) (cursor-fn nil)
                                    (cursor-image nil) (cursor-hotspot '(0.0 . 0.0))
                                    (cursor-size nil)
+                                   (audio nil)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
   "Render a real per-frame video into an OUT-W x OUT-H canvas. FRAME-FN is
@@ -778,7 +808,7 @@ zoom and drawn as an overlay. CURSOR-IMAGE, when given, is (list rgba-bytes w h)
 for a user cursor drawn instead of the built-in arrow, with CURSOR-HOTSPOT (cons
 hx . hy, fraction of the image) as the click point and CURSOR-SIZE its height as a
 fraction of OUT-H. The texture is uploaded once and updated each frame."
-  (let ((raw (format nil "~A.raw" path)))
+  (progn
     (egl:with-headless-gl (ctx out-w out-h)
       (declare (ignore ctx))
       (make-fbo out-w out-h)
@@ -799,31 +829,35 @@ fraction of OUT-H. The texture is uploaded once and updated each frame."
              (img-w    (when cursor-image
                          (* img-h (/ (float (second cursor-image) 1.0)
                                      (float (third cursor-image) 1.0))))))
-        (with-open-file (s raw :direction :output :element-type '(unsigned-byte 8)
-                               :if-exists :supersede)
-          (dotimes (i n-frames)
-            (when (> i 0)
-              (update-texture-rgba tex (funcall frame-fn i) source-width source-height
-                                   :source-format source-format))
-            (let* ((tsec  (if time-fn (funcall time-fn i) (/ i (float fps 1.0))))
-                   (frame (kf:sample-timeline keyframes tsec)))
-              (gl:clear-color 0.0 0.0 0.0 1.0)
-              (gl:clear :color-buffer-bit)
-              (draw-compose program vao tex frame out-w out-h crop)
-              (when cursor-fn
-                (let ((cuv (funcall cursor-fn i)))
-                  (when cuv
-                    (multiple-value-bind (px py vis)
-                        (cursor-output-px cuv frame out-w out-h)
-                      (when vis
-                        (if img-prog
-                            (draw-cursor-image img-prog vao cur-tex px py
-                                               img-w img-h cursor-hotspot
-                                               frame out-w out-h)
-                            (draw-cursor curs-prog vao px py cur-size frame out-w out-h)))))))
-              (gl:finish)
-              (write-sequence (read-rgba out-w out-h) s))))
-        (%encode-raw raw out-w out-h fps path n-frames)))))
+        (let ((enc (%open-frame-encoder path out-w out-h fps :audio audio)))
+          (unwind-protect
+               (dotimes (i n-frames)
+                 (when (> i 0)
+                   (update-texture-rgba tex (funcall frame-fn i) source-width source-height
+                                        :source-format source-format))
+                 (let* ((tsec  (if time-fn (funcall time-fn i) (/ i (float fps 1.0))))
+                        (frame (kf:sample-timeline keyframes tsec)))
+                   (gl:clear-color 0.0 0.0 0.0 1.0)
+                   (gl:clear :color-buffer-bit)
+                   (draw-compose program vao tex frame out-w out-h crop)
+                   (when cursor-fn
+                     (let ((cuv (funcall cursor-fn i)))
+                       (when cuv
+                         (multiple-value-bind (px py vis)
+                             (cursor-output-px cuv frame out-w out-h)
+                           (when vis
+                             (if img-prog
+                                 (draw-cursor-image img-prog vao cur-tex px py
+                                                    img-w img-h cursor-hotspot
+                                                    frame out-w out-h)
+                                 (draw-cursor curs-prog vao px py cur-size frame out-w out-h)))))))
+                   (gl:finish)
+                   ;; stream this frame straight to ffmpeg -- no raw dump on disk
+                   (%write-frame enc (read-rgba out-w out-h))))
+            ;; on the happy path this finalizes; on a nonlocal exit it still
+            ;; closes stdin so ffmpeg won't hang holding the pipe.
+            (%close-frame-encoder enc n-frames fps))
+          (values path n-frames))))))
 
 (defun bgrx-bridge-test (&key (width 256) (height 144))
   "Feed a BGRx copy of an RGBA pattern with :source-format :bgra and draw it 1:1;

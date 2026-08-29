@@ -8,7 +8,7 @@
 
 (asdf:defsystem "takesy/pipewire"
   :description "Pure-Lisp CFFI bindings to libpipewire-0.3 for frame capture."
-  :depends-on ("cffi")
+  :depends-on ("cffi" "takesy/audio")
   :serial t
   :components ((:module "src"
                 :components ((:file "pipewire-package")
@@ -58,9 +58,16 @@
   :components ((:module "src"
                 :components ((:file "evdev")))))
 
+(asdf:defsystem "takesy/audio"
+  :description "Opt-in audio capture: parallel ffmpeg PulseAudio recorder -> wav."
+  :serial t
+  :components ((:module "src"
+                :components ((:file "audio")))))
+
 (asdf:defsystem "takesy/record"
   :description "Record orchestration: portal capture -> Director -> compositor -> mp4."
-  :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor")
+  :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor"
+               "takesy/audio")
   :serial t
   :components ((:module "src"
                 :components ((:file "record")))))

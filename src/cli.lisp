@@ -72,6 +72,19 @@ gray, dark, navy, slate, ...). Return (r g b) in 0..1."
                         (float n 1.0)))))
       (cons (num (subseq str 0 c)) (num (subseq str (1+ c)))))))
 
+(defun parse-audio (str)
+  "Parse --audio into a source mode: system/desktop/monitor -> :system,
+mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
+  (if (null str)
+      nil
+      (let ((s (string-downcase (string-trim " " str))))
+        (cond
+          ((member s '("off" "none" "no") :test #'string=) nil)
+          ((member s '("system" "desktop" "monitor") :test #'string=) :system)
+          ((member s '("mic" "microphone" "input") :test #'string=) :mic)
+          ((member s '("both" "on" "yes" "all" "mix") :test #'string=) :both)
+          (t (error "bad --audio ~S (use system, mic, both, or off)" str))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Subcommands.
 
@@ -100,6 +113,8 @@ options:
   --cursor PATH     draw a custom cursor image (png/...) instead of the arrow
   --cursor-hotspot X,Y  click point as a fraction of the image (default 0,0 = top-left)
   --cursor-size F   cursor height as a fraction of output height (default 0.06)
+  --audio  MODE     record audio (capture/record): system (desktop), mic, or both
+                    (default: off). Muxed into the mp4; survives capture->render.
 
 direction tuning (auto-zoom + cursor feel):
   --zoom   F              punch-in zoom factor for activity     (default 1.8)
@@ -142,13 +157,14 @@ option alist O, applying defaults. Shared by `record` and `render`."
          (dur (opt-num o "duration" 30.0))
          (fps (opt-int o "fps" 24))
          (dir (opt o "dir" "/tmp/takesy-rec"))
+         (audio (parse-audio (opt o "audio" nil)))
          (ra  (%render-args o)))
-    (format t "takesy: recording up to ~,0Fs @ ~Dfps, up to ~Dp tall -> ~A~%"
-            dur fps (getf ra :max-height) (getf ra :out))
+    (format t "takesy: recording up to ~,0Fs @ ~Dfps, up to ~Dp tall~@[ +audio(~(~A~))~] -> ~A~%"
+            dur fps (getf ra :max-height) audio (getf ra :out))
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
-    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir)))
+    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir :audio audio)))
       (multiple-value-bind (path n) (apply #'rec:render-recording rec ra)
         (format t "done: wrote ~A (~D frames)~%" path n)
         (format t "  re-render this capture with: takesy render ~A [--bg ... --zoom ...]~%" dir)
@@ -160,11 +176,13 @@ can be rendered -- and re-rendered with different config -- later."
   (let* ((o   (parse-kv args))
          (dur (opt-num o "duration" 30.0))
          (fps (opt-int o "fps" 24))
-         (dir (opt o "dir" "/tmp/takesy-rec")))
-    (format t "takesy: capturing up to ~,0Fs @ ~Dfps -> ~A~%" dur fps dir)
+         (dir (opt o "dir" "/tmp/takesy-rec"))
+         (audio (parse-audio (opt o "audio" nil))))
+    (format t "takesy: capturing up to ~,0Fs @ ~Dfps~@[ +audio(~(~A~))~] -> ~A~%"
+            dur fps audio dir)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish.~%")
-    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir)))
+    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir :audio audio)))
       (format t "done: captured ~D frames to ~A~%" (length (getf rec :frames)) dir)
       (format t "  render it with: takesy render ~A [--output out.mp4 --bg ... --zoom ...]~%" dir)
       dir)))

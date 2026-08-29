@@ -231,6 +231,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (cursor-image nil)
                                             (cursor-hotspot '(0.0 . 0.0))
                                             (cursor-size nil)
+                                            (audio nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
@@ -281,23 +282,27 @@ without an over-large file."
                   :cursor-fn cursor-fn
                   :cursor-image cursor-image :cursor-hotspot cursor-hotspot
                   :cursor-size cursor-size
+                  :audio audio
                   :crop crop
                   :path out))
             (%close-decoder dec)))))))
 
-(defun capture-recording (&key (duration 30.0) (fps 24) (dir "/tmp/takesy-rec"))
+(defun capture-recording (&key (duration 30.0) (fps 24) (dir "/tmp/takesy-rec")
+                               (audio nil))
   "Capture stage only: pop the screen-share dialog and record until you end the
 share -- click GNOME's Stop button in the top bar -- or DURATION seconds elapse as
 a safety cap. Frames (and the compressed intermediate) are written under DIR, and
 RECORD-FRAMES persists a manifest.sexp there so the recording is self-contained and
 can be re-rendered later with LOAD-RECORDING + RENDER-RECORDING. FPS only sets the
-capture throttle (a bit above the output rate). Return the recording plist."
+capture throttle (a bit above the output rate). AUDIO (:system | :mic | :both)
+records a parallel audio track stored in the manifest. Return the recording plist."
   (portal:with-screencast (fd node :cursor-mode portal:+cursor-metadata+)
     (format t "  [capture] recording... click the Stop button in the GNOME top bar ~
                  to finish (or ~,0Fs max).~%" duration)
     ;; Capture throttle a bit above the output rate so we keep enough source
     ;; frames; the real limit is the compositor's on-change delivery.
-    (pw:record-frames fd node :duration duration :max-fps (max fps 30) :dir dir)))
+    (pw:record-frames fd node :duration duration :max-fps (max fps 30) :dir dir
+                              :audio audio)))
 
 (defun render-recording (rec &key (fps 24) (max-height 1200)
                                   (bg '(0.11 0.12 0.15))
@@ -348,7 +353,9 @@ different config. Return (values out n-frames)."
       (compose-recording rec timeline :out out :max-height max-height
                          :fps fps :cursor-session eased :crop crop
                          :cursor-image cursor-image
-                         :cursor-hotspot cursor-hotspot :cursor-size cursor-size))))
+                         :cursor-hotspot cursor-hotspot :cursor-size cursor-size
+                         ;; audio was captured alongside the frames; mux it back in
+                         :audio (getf rec :audio)))))
 
 (defun render-recording-dir (dir &rest render-args)
   "Load the manifest RECORD-FRAMES persisted under DIR and RENDER-RECORDING it.
@@ -362,6 +369,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (cursor nil)
                            (cursor-hotspot '(0.0 . 0.0))
                            (cursor-size nil)
+                           (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -372,7 +380,7 @@ capture the screen (METADATA cursor mode) until you click GNOME's Stop button (o
 DURATION as a safety cap), then auto-zoom and composite to OUT. Kept as the
 one-call path; the two halves are separately callable so a capture can be
 re-rendered. Return (values out n-frames)."
-  (let ((rec (capture-recording :duration duration :fps fps :dir dir)))
+  (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio)))
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size
