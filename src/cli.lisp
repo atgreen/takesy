@@ -85,6 +85,19 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
           ((member s '("both" "on" "yes" "all" "mix") :test #'string=) :both)
           (t (error "bad --audio ~S (use system, mic, both, or off)" str))))))
 
+(defun parse-aspect (str)
+  "Parse --aspect `W:H` (e.g. 9:16, 1:1, 16:9) into a (cons w . h) of positive
+integers, or NIL when absent."
+  (if (null str)
+      nil
+      (let ((c (position #\: str)))
+        (unless c (error "bad --aspect ~S (use W:H, e.g. 9:16, 1:1, 16:9)" str))
+        (let ((w (parse-integer str :end c :junk-allowed nil))
+              (h (parse-integer str :start (1+ c) :junk-allowed nil)))
+          (unless (and (plusp w) (plusp h))
+            (error "bad --aspect ~S (W and H must be positive)" str))
+          (cons w h)))))
+
 ;;; ------------------------------------------------------------------
 ;;; Subcommands.
 
@@ -112,6 +125,8 @@ options:
                     or `blur` (a frosted, blurred copy of the screen)
   --bg-image PATH   background image (png/...), cover-fit behind the inset;
                     overrides --bg
+  --aspect W:H      reframe output to an aspect (e.g. 9:16 vertical, 1:1),
+                    keeping the active region centered (default: content aspect)
   --corner-radius F rounded-corner radius, fraction of content (default 0.09;
                     0 = square corners)
   --cursor PATH     draw a custom cursor image (png/...) instead of the arrow
@@ -147,6 +162,7 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :bg                (if (and bg-str (not bg-blur))
                                  (parse-color bg-str) '(0.11 0.12 0.15))
           :bg-image          (opt o "bg-image" nil)
+          :aspect            (parse-aspect (opt o "aspect" nil))
           :corner            (opt-num o "corner-radius" 0.09)
           :cursor            (opt o "cursor" nil)
           :cursor-hotspot    (let ((s (opt o "cursor-hotspot" nil)))

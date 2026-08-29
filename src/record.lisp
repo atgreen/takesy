@@ -187,6 +187,24 @@ already covers >= MIN-COVER of the frame (nothing worth cropping)."
             (list (max 0.0 (- x0 margin)) (max 0.0 (- y0 margin))
                   (min 1.0 (+ x1 margin)) (min 1.0 (+ y1 margin))))))))
 
+(defun %reshape-crop (crop fw fh tw th)
+  "Reshape CROP (x0 y0 x1 y1 source UV) so its pixel aspect matches TW:TH, centered
+on the crop's centre and clamped to the frame. Used for social reframe (9:16, 1:1,
+...): narrows width or reduces height to hit the target, keeping the active region
+centered."
+  (destructuring-bind (x0 y0 x1 y1) crop
+    (let* ((cx (* 0.5 (+ x0 x1))) (cy (* 0.5 (+ y0 y1)))
+           (cw (* (- x1 x0) fw)) (ch (* (- y1 y0) fh))
+           (target (/ (float tw 1.0) (float th 1.0)))
+           (cur    (/ cw (max 1.0 ch))))
+      (if (> cur target)
+          ;; too wide -> narrow the width to match the target aspect
+          (let ((halfu (/ (* 0.5 ch target) fw)))
+            (list (max 0.0 (- cx halfu)) y0 (min 1.0 (+ cx halfu)) y1))
+          ;; too tall -> reduce the height
+          (let ((halfv (/ (* 0.5 (/ cw target)) fh)))
+            (list x0 (max 0.0 (- cy halfv)) x1 (min 1.0 (+ cy halfv))))))))
+
 (defun recording->session (rec &optional (crop '(0.0 0.0 1.0 1.0)))
   "Build a Director SESSION from a capture recording plist. CROP (x0 y0 x1 y1 in
 source UV) reframes the session onto just the content region: the session
@@ -315,6 +333,7 @@ records a parallel audio track stored in the manifest. Return the recording plis
                                   (cursor-size nil)
                                   (bg-image nil)
                                   (bg-blur nil)
+                                  (aspect nil)
                                   (zoom dir:*zoom-level*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -338,8 +357,14 @@ different config. Return (values out n-frames)."
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
         (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image)))))
     (let* (;; Crop to the real content (trim empty desktop borders) -- everything
-           ;; downstream works in this cropped frame.
-           (crop     (or (compute-content-bbox rec) '(0.0 0.0 1.0 1.0)))
+           ;; downstream works in this cropped frame. ASPECT (cons w . h) reshapes
+           ;; that crop to a target output aspect (e.g. 9:16 vertical), centered on
+           ;; the content, so the whole pipeline reframes to it.
+           (crop0    (or (compute-content-bbox rec) '(0.0 0.0 1.0 1.0)))
+           (crop     (if aspect
+                         (%reshape-crop crop0 (getf rec :width) (getf rec :height)
+                                        (car aspect) (cdr aspect))
+                         crop0))
            (session  (recording->session rec crop))
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
            (timeline (progn (setf (dir:session-damage session) damage)
@@ -378,6 +403,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (cursor-size nil)
                            (bg-image nil)
                            (bg-blur nil)
+                           (aspect nil)
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -393,6 +419,7 @@ re-rendered. Return (values out n-frames)."
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur
+                          :aspect aspect
                           :zoom zoom :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate

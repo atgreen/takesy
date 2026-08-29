@@ -119,6 +119,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
 | `--bg COLOR` | background — `#RRGGBB`, a name (`black`, `white`, `dark`, `navy`, `slate`, …), or `blur` (a frosted, blurred copy of the screen) | `dark` |
 | `--bg-image PATH` | background image (PNG or anything ffmpeg reads), cover-fit behind the inset; overrides `--bg` | — |
+| `--aspect W:H` | reframe the output to an aspect (e.g. `9:16` vertical, `1:1` square), keeping the active region centered | content aspect |
 | `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
 | `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
 | `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |
