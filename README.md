@@ -122,7 +122,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
-| `--bg COLOR` | background — `#RRGGBB`, a name (`black`, `white`, `dark`, `navy`, `slate`, …), or `blur` (a frosted, blurred copy of the screen) | `dark` |
+| `--bg COLOR` | background — `blur` (default; a frosted copy of the screen), or `#RRGGBB` / a name (`black`, `white`, `dark`, `navy`, `slate`, …) for a solid | `blur` |
 | `--bg-image PATH` | background image (PNG or anything ffmpeg reads), cover-fit behind the inset; overrides `--bg` | — |
 | `--aspect W:H` | reframe the output to an aspect (e.g. `9:16` vertical, `1:1` square); the screen is scaled to fit inside it (letterboxed, never cropped) | content aspect |
 | `--region X,Y,W,H` | frame a fixed screen region (source pixels) instead of auto-cropping to content | auto-crop |
@@ -142,7 +142,7 @@ Dial the auto-zoom and cursor feel to taste:
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--zoom F` | punch-in zoom factor for activity | `1.8` |
-| `--zoom-min F` | force at least this zoom on detected activity even when it's too spread out to auto-fit (e.g. full-screen apps); centers on the cursor | off |
+| `--zoom-min F` | floor zoom for activity too spread out to auto-fit (e.g. full-screen apps); centers on the cursor; `≤1` disables | `1.6` |
 | `--zoom-merge-gap S` | idle gap (s) below which the zoom pans between spots instead of zooming out and back in | `2.5` |
 | `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher is snappier with less lag | `30.0` |
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.4` |

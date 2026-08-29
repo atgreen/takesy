@@ -146,8 +146,8 @@ options:
   --duration S     max seconds (safety)  (default 30; capture/record)
   --fps    N       output frames/sec     (default 24; static stretches hold)
   --height N        max output height, px (default 1200; never upscales)
-  --bg     COLOR    background: #RRGGBB, a name (black/white/dark/navy/...),
-                    or `blur` (a frosted, blurred copy of the screen)
+  --bg     COLOR    background (default: blur -- a frosted copy of the screen);
+                    pass #RRGGBB or a name (black/white/dark/navy/...) for a solid
   --bg-image PATH   background image (png/...), cover-fit behind the inset;
                     overrides --bg
   --aspect W:H      reframe output to an aspect (e.g. 9:16 vertical, 1:1);
@@ -172,8 +172,8 @@ options:
 
 direction tuning (auto-zoom + cursor feel):
   --zoom   F              punch-in zoom factor for activity     (default 1.8)
-  --zoom-min F            force at least this zoom on activity even if
-                          spread out (e.g. full-screen apps); centers on cursor
+  --zoom-min F            floor zoom for activity too spread out to auto-fit
+                          (full-screen apps), centered on cursor (default 1.6; <=1 off)
   --zoom-merge-gap S      idle gap below which zoom pans instead
                           of zooming out and back in            (default 2.5)
   --cursor-omega-fast R   cursor-spring stiffness when moving
@@ -192,7 +192,9 @@ Distributed under the MIT license; this is free software with NO WARRANTY.
   "Extract RENDER-RECORDING keyword args (direction tuning + output) from the
 option alist O, applying defaults. Shared by `record` and `render`."
   (let* ((bg-str  (opt o "bg" nil))
-         (bg-blur (and bg-str (string-equal (string-trim " " bg-str) "blur"))))
+         ;; Background defaults to blur (frosted screen); a --bg colour turns it
+         ;; into a solid backdrop, --bg blur is explicit.
+         (bg-blur (or (null bg-str) (string-equal (string-trim " " bg-str) "blur"))))
     (list :fps               (opt-int o "fps" 24)
           :max-height        (opt-int o "height" 1200)
           :bg-blur           bg-blur
@@ -220,7 +222,8 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :cursor-size       (when (opt o "cursor-size" nil)
                                (opt-num o "cursor-size" 0.06))
           :zoom              (opt-num o "zoom" 1.8)
-          :zoom-min          (when (opt o "zoom-min" nil) (opt-num o "zoom-min" 1.5))
+          :zoom-min          (let ((v (opt-num o "zoom-min" 1.6)))  ; default on; <=1 disables
+                               (when (> v 1.0) v))
           :zoom-merge-gap    (opt-num o "zoom-merge-gap" 2.5)
           :cursor-omega-fast (opt-num o "cursor-omega-fast" 30.0)
           :cursor-anticipate (opt-num o "cursor-anticipate" 0.4)
