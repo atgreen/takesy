@@ -85,6 +85,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
 | `--bg COLOR` | background colour — `#RRGGBB` or a name (`black`, `white`, `dark`, `navy`, `slate`, …) | `dark` |
+| `--bg-image PATH` | background image (PNG or anything ffmpeg reads), cover-fit behind the inset; overrides `--bg` | — |
 | `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
 | `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
 | `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |

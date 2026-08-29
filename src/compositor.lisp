@@ -372,7 +372,10 @@ uniform vec2  u_center;    // pre-clamped focal point, source UV
 uniform vec2  u_canvas;       // output size in px (W,H)
 uniform float u_padding;      // inset margin, fraction of min(W,H)
 uniform float u_corner;       // rounded-rect radius, fraction of min(content dim)
-uniform vec3  u_bg;           // background colour
+uniform vec3  u_bg;           // background colour (used when u_has_bg == 0)
+uniform sampler2D u_bgtex;    // background image (used when u_has_bg == 1)
+uniform int   u_has_bg;       // 1 = sample u_bgtex, 0 = solid u_bg
+uniform vec2  u_bg_size;      // background image size in px (for cover-fit aspect)
 uniform float u_shadow_blur;  // shadow softness, fraction of min(W,H); 0 = none
 uniform float u_shadow_alpha; // shadow peak opacity 0..1
 uniform vec4  u_crop;         // (x0,y0,x1,y1) source UV region to show; 0011 = all
@@ -410,22 +413,45 @@ void main() {
     float dsh  = sd_round_box(P - ctr - soff, b, r);
     sh = 1.0 - smoothstep(0.0, blurPx, dsh);
   }
-  vec3 col = mix(u_bg, vec3(0.0), u_shadow_alpha * sh);
+  // Background: a solid colour, or a cover-fit image (scaled to fill the canvas
+  // preserving aspect, centre-cropped) when one is supplied.
+  vec3 bgcol = u_bg;
+  if (u_has_bg == 1) {
+    float ca = u_canvas.x / u_canvas.y;
+    float ia = u_bg_size.x / u_bg_size.y;
+    vec2  s  = (ia > ca) ? vec2(ca / ia, 1.0) : vec2(1.0, ia / ca);
+    vec2  buv = (v_uv - vec2(0.5)) * s + vec2(0.5);
+    bgcol = texture(u_bgtex, buv).rgb;
+  }
+  vec3 col = mix(bgcol, vec3(0.0), u_shadow_alpha * sh);
   col      = mix(col, screen, ins);
   frag = vec4(col, 1.0);
 }")
 
-(defun draw-compose (program vao tex frame canvas-w canvas-h &optional (crop '(0.0 0.0 1.0 1.0)))
+(defun draw-compose (program vao tex frame canvas-w canvas-h
+                     &optional (crop '(0.0 0.0 1.0 1.0))
+                     &key bg-tex bg-size)
   "Draw FRAME's zoomed screen inset on its background, rounded corners, into the
 bound FBO. CANVAS-W/H are the output size in pixels. CROP (x0 y0 x1 y1 in source
 UV) selects the region of the source to show -- used to trim empty desktop
-borders so the output frames the actual content."
+borders so the output frames the actual content. BG-TEX, when given, is a
+background-image texture (BG-SIZE = (cons w . h) px) drawn cover-fit instead of
+the solid FRAME background colour."
   (let ((ec (kf:effective-center frame)))
     (gl:use-program program)
     (gl:active-texture :texture0)
     (gl:bind-texture :texture-2d tex)
+    (when bg-tex
+      (gl:active-texture :texture1)
+      (gl:bind-texture :texture-2d bg-tex)
+      (gl:active-texture :texture0))
     (flet ((uni (n) (gl:get-uniform-location program n)))
       (let ((l (uni "tex")))       (when (>= l 0) (gl:uniformi l 0)))
+      (let ((l (uni "u_bgtex")))   (when (>= l 0) (gl:uniformi l 1)))
+      (let ((l (uni "u_has_bg")))  (when (>= l 0) (gl:uniformi l (if bg-tex 1 0))))
+      (let ((l (uni "u_bg_size")))
+        (when (and (>= l 0) bg-size)
+          (gl:uniformf l (float (car bg-size) 1.0) (float (cdr bg-size) 1.0))))
       (let ((l (uni "u_zoom")))    (when (>= l 0) (gl:uniformf l (float (kf:keyframe-zoom frame) 1.0))))
       (let ((l (uni "u_center")))  (when (>= l 0) (gl:uniformf l (float (car ec) 1.0) (float (cdr ec) 1.0))))
       (let ((l (uni "u_canvas")))  (when (>= l 0) (gl:uniformf l (float canvas-w 1.0) (float canvas-h 1.0))))
@@ -814,6 +840,7 @@ image) placed at framebuffer (PX,PY), sized W x H px, clipped to the content rec
                                    (time-fn nil) (cursor-fn nil)
                                    (cursor-image nil) (cursor-hotspot '(0.0 . 0.0))
                                    (cursor-size nil)
+                                   (bg-image nil)
                                    (audio nil)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
@@ -827,7 +854,9 @@ cursor for frame I, or nil to draw none; it is transformed through the frame's
 zoom and drawn as an overlay. CURSOR-IMAGE, when given, is (list rgba-bytes w h)
 for a user cursor drawn instead of the built-in arrow, with CURSOR-HOTSPOT (cons
 hx . hy, fraction of the image) as the click point and CURSOR-SIZE its height as a
-fraction of OUT-H. The texture is uploaded once and updated each frame."
+fraction of OUT-H. BG-IMAGE, when given, is (list rgba-bytes w h) drawn cover-fit
+as the padded background instead of the solid colour. The texture is uploaded once
+and updated each frame."
   (progn
     (egl:with-headless-gl (ctx out-w out-h)
       (declare (ignore ctx))
@@ -844,6 +873,11 @@ fraction of OUT-H. The texture is uploaded once and updated each frame."
                          (make-texture-rgba (first cursor-image)
                                             (second cursor-image) (third cursor-image)
                                             :source-format :rgba :filter :linear)))
+             (bg-tex   (when bg-image
+                         (make-texture-rgba (first bg-image)
+                                            (second bg-image) (third bg-image)
+                                            :source-format :rgba :filter :linear)))
+             (bg-size  (when bg-image (cons (second bg-image) (third bg-image))))
              (cur-size (* out-h 0.030))                    ; built-in arrow scale
              (img-h    (* out-h (or cursor-size 0.06)))    ; user cursor height, px
              (img-w    (when cursor-image
@@ -859,7 +893,8 @@ fraction of OUT-H. The texture is uploaded once and updated each frame."
                         (frame (kf:sample-timeline keyframes tsec)))
                    (gl:clear-color 0.0 0.0 0.0 1.0)
                    (gl:clear :color-buffer-bit)
-                   (draw-compose program vao tex frame out-w out-h crop)
+                   (draw-compose program vao tex frame out-w out-h crop
+                                 :bg-tex bg-tex :bg-size bg-size)
                    (when cursor-fn
                      (let ((cuv (funcall cursor-fn i)))
                        (when cuv

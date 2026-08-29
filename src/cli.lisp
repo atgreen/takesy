@@ -109,6 +109,8 @@ options:
   --fps    N       output frames/sec     (default 24; static stretches hold)
   --height N        max output height, px (default 1200; never upscales)
   --bg     COLOR    background: #RRGGBB or a name (black/white/dark/navy/...)
+  --bg-image PATH   background image (png/...), cover-fit behind the inset;
+                    overrides --bg
   --corner-radius F rounded-corner radius, fraction of content (default 0.09;
                     0 = square corners)
   --cursor PATH     draw a custom cursor image (png/...) instead of the arrow
@@ -140,6 +142,7 @@ option alist O, applying defaults. Shared by `record` and `render`."
     (list :fps               (opt-int o "fps" 24)
           :max-height        (opt-int o "height" 1200)
           :bg                (if bg-str (parse-color bg-str) '(0.11 0.12 0.15))
+          :bg-image          (opt o "bg-image" nil)
           :corner            (opt-num o "corner-radius" 0.09)
           :cursor            (opt o "cursor" nil)
           :cursor-hotspot    (let ((s (opt o "cursor-hotspot" nil)))

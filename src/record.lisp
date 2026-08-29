@@ -231,6 +231,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (cursor-image nil)
                                             (cursor-hotspot '(0.0 . 0.0))
                                             (cursor-size nil)
+                                            (bg-image nil)
                                             (audio nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
@@ -282,6 +283,7 @@ without an over-large file."
                   :cursor-fn cursor-fn
                   :cursor-image cursor-image :cursor-hotspot cursor-hotspot
                   :cursor-size cursor-size
+                  :bg-image bg-image
                   :audio audio
                   :crop crop
                   :path out))
@@ -310,6 +312,7 @@ records a parallel audio track stored in the manifest. Return the recording plis
                                   (cursor nil)
                                   (cursor-hotspot '(0.0 . 0.0))
                                   (cursor-size nil)
+                                  (bg-image nil)
                                   (zoom dir:*zoom-level*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -330,7 +333,8 @@ different config. Return (values out n-frames)."
         (dir:*zoom-merge-gap*    zoom-merge-gap)
         (dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
-        (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor)))))
+        (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
+        (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image)))))
     (let* (;; Crop to the real content (trim empty desktop borders) -- everything
            ;; downstream works in this cropped frame.
            (crop     (or (compute-content-bbox rec) '(0.0 0.0 1.0 1.0)))
@@ -354,6 +358,7 @@ different config. Return (values out n-frames)."
                          :fps fps :cursor-session eased :crop crop
                          :cursor-image cursor-image
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
+                         :bg-image bg-image-data
                          ;; audio was captured alongside the frames; mux it back in
                          :audio (getf rec :audio)))))
 
@@ -369,6 +374,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (cursor nil)
                            (cursor-hotspot '(0.0 . 0.0))
                            (cursor-size nil)
+                           (bg-image nil)
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -383,7 +389,7 @@ re-rendered. Return (values out n-frames)."
   (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio)))
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
                           :cursor cursor :cursor-hotspot cursor-hotspot
-                          :cursor-size cursor-size
+                          :cursor-size cursor-size :bg-image bg-image
                           :zoom zoom :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
