@@ -188,6 +188,53 @@ already covers >= MIN-COVER of the frame (nothing worth cropping)."
             (list (max 0.0 (- x0 margin)) (max 0.0 (- y0 margin))
                   (min 1.0 (+ x1 margin)) (min 1.0 (+ y1 margin))))))))
 
+(defun %build-idle-warp (damage span &key (threshold 1.2) (keep 0.4))
+  "From the DAMAGE track (list of (time ...) where the screen changed) over a
+SPAN-second source timeline, build a monotonic time warp: a function OUT-TIME ->
+SRC-TIME that keeps active stretches at 1x but cuts each idle gap (no screen
+change) longer than THRESHOLD down to KEEP seconds. Return (values WARP-FN
+OUT-DURATION KEPT-SEGMENTS), where KEPT-SEGMENTS is the list of (src-start .
+src-end) intervals kept at 1x (for trimming audio in sync). Identity warp when
+nothing is idle."
+  (let* ((acts (sort (remove-duplicates
+                      (loop for d in damage collect (float (first d) 1.0)))
+                     #'<))
+         (times (sort (remove-duplicates (append (list 0.0) acts (list (float span 1.0))))
+                      #'<))
+         (bps  (list (cons 0.0 0.0)))   ; (out . src) breakpoints
+         (segs '())                     ; kept (src-start . src-end)
+         (out 0.0) (prev 0.0) (seg-start 0.0))
+    (dolist (tt (rest times))
+      (let ((gap (- tt prev)))
+        (cond
+          ((> gap threshold)
+           ;; idle: keep the first KEEP seconds at 1x, then cut to TT
+           (incf out keep) (push (cons out (+ prev keep)) bps)
+           (push (cons seg-start (+ prev keep)) segs)     ; close the kept run
+           (push (cons out tt) bps)                       ; cut: src jumps, out held
+           (setf seg-start tt))
+          (t
+           (incf out gap) (push (cons out tt) bps)))
+        (setf prev tt)))
+    (push (cons seg-start (float span 1.0)) segs)
+    (let ((bpv (coerce (nreverse bps) 'vector)) (out-dur out))
+      (values
+       (lambda (to)
+         ;; linear-interpolate SRC from OUT across the breakpoints
+         (let ((n (length bpv)))
+           (if (<= to (car (aref bpv 0))) (cdr (aref bpv 0))
+               (loop for k from 1 below n
+                     for b0 = (aref bpv (1- k)) for b1 = (aref bpv k)
+                     when (<= to (car b1))
+                       do (let ((dw (- (car b1) (car b0))))
+                            (return (if (> dw 1e-6)
+                                        (+ (cdr b0) (* (/ (- to (car b0)) dw)
+                                                       (- (cdr b1) (cdr b0))))
+                                        (cdr b1))))
+                     finally (return (cdr (aref bpv (1- n))))))))
+       out-dur
+       (nreverse segs)))))
+
 (defun %region-uv (region fw fh)
   "Convert REGION (list x y w h, source pixels) to a (x0 y0 x1 y1) source-UV crop,
 clamped to the frame."
@@ -263,6 +310,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (bg-blur nil)
                                             (clicks nil) (ripple-color '(1.0 1.0 1.0))
                                             (audio nil)
+                                            (time-warp nil) (out-duration nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
@@ -276,17 +324,21 @@ without an over-large file."
     (when (zerop nsrc) (error "recording has no frames"))
     (destructuring-bind (cx0 cy0 cx1 cy1) crop
       (let* ((span (float (getf (aref frames (1- nsrc)) :time) 1.0))
-             (dur  (or duration span))
+             ;; TIME-WARP maps output time -> source time (idle-removal); identity
+             ;; otherwise. DUR is the OUTPUT length.
+             (warp (or time-warp #'identity))
+             (dur  (or out-duration duration span))
              (nout (max 1 (round (* fps dur))))
              (fw (getf rec :width)) (fh (getf rec :height))    ; full frame = texture
              (cw (* (- cx1 cx0) fw)) (ch (* (- cy1 cy0) fh))   ; cropped content px
              (oh (* 2 (max 1 (round (/ (min ch (float max-height 1.0)) 2)))))
              (ow (* 2 (max 1 (round (/ (* cw (/ oh ch)) 2)))))
              (cache-idx -1) (cache-bytes nil)
+             (src-time (lambda (i) (funcall warp (/ i (float fps 1.0)))))  ; out frame -> src time
              (cursor-fn (when cursor-session   ; cursor coords are in cropped px
                           (lambda (i)
                             (multiple-value-bind (x y)
-                                (dir:cursor-at cursor-session (/ i (float fps 1.0)))
+                                (dir:cursor-at cursor-session (funcall src-time i))
                               (cons (/ x (float cw 1.0)) (/ y (float ch 1.0))))))))
         (format t "  [record] compositing ~D src frames -> ~D output frames ~
                    (~,1Fs @ ~Dfps) crop ~,2Fx~,2F of frame -> ~Dx~D~@[ +cursor~]~%"
@@ -296,8 +348,8 @@ without an over-large file."
         (let ((dec (when (getf rec :intermediate)
                      (%open-decoder (getf rec :intermediate) fw fh))))
           (unwind-protect
-               (flet ((src (i)   ; nearest source frame for output time i/fps
-                        (let ((idx (%nearest-frame-index frames (/ i (float fps 1.0)))))
+               (flet ((src (i)   ; nearest source frame for output frame i (warped)
+                        (let ((idx (%nearest-frame-index frames (funcall src-time i))))
                           (if dec
                               (%decoder-frame dec idx)
                               (progn
@@ -309,7 +361,7 @@ without an over-large file."
                   timeline #'src nout ow oh
                   :fps fps :source-format :bgra
                   :source-width fw :source-height fh
-                  :time-fn (lambda (i) (/ i (float fps 1.0)))
+                  :time-fn src-time
                   :cursor-fn cursor-fn
                   :cursor-image cursor-image :cursor-hotspot cursor-hotspot
                   :cursor-size cursor-size
@@ -378,6 +430,7 @@ recording plist."
                                   (ripples t)
                                   (aspect nil)
                                   (region nil)
+                                  (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
                                   (zoom dir:*zoom-level*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -419,12 +472,21 @@ different config. Return (values out n-frames)."
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)
                                        :height (dir:session-height session)
-                                       :cursor (dir:ease-cursor session))))
+                                       :cursor (dir:ease-cursor session)))
+           ;; Idle removal: warp output time -> source time, cutting long
+           ;; no-change gaps. WARP-INFO is (warp-fn out-duration segments) or NIL.
+           (span     (float (getf (car (last (getf rec :frames))) :time) 1.0))
+           (warp-info (when trim-idle
+                        (multiple-value-list
+                         (%build-idle-warp damage span
+                                           :threshold idle-threshold :keep max-idle)))))
       (format t "  [render] ~D frames (~D cursor, ~D changed) -> ~D keyframes~%"
               (length (getf rec :frames))
               (length (dir:session-cursor session))
               (length damage)
               (length timeline))
+      (when warp-info
+        (format t "  [render] idle-trim: ~,1Fs -> ~,1Fs~%" span (second warp-info)))
       ;; No :duration -> compose uses the actual captured span (you decide the
       ;; length by when you click Stop).
       (compose-recording rec timeline :out out :max-height max-height
@@ -433,8 +495,15 @@ different config. Return (values out n-frames)."
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
                          :bg-image bg-image-data :bg-blur bg-blur
                          :clicks (when ripples (getf rec :click-times))
-                         ;; audio was captured alongside the frames; mux it back in
-                         :audio (getf rec :audio)))))
+                         :time-warp (first warp-info) :out-duration (second warp-info)
+                         ;; audio was captured alongside the frames; mux it back in.
+                         ;; Idle-trim would desync it -> drop it (synced trim is TODO).
+                         :audio (if (and warp-info (getf rec :audio))
+                                    (progn
+                                      (format t "  [render] note: --trim-idle drops audio ~
+                                                 (synced trim not yet implemented)~%")
+                                      nil)
+                                    (getf rec :audio))))))
 
 (defun render-recording-dir (dir &rest render-args)
   "Load the manifest RECORD-FRAMES persisted under DIR and RENDER-RECORDING it.
@@ -453,6 +522,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (ripples t)
                            (aspect nil)
                            (region nil)
+                           (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -469,6 +539,7 @@ re-rendered. Return (values out n-frames)."
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
                           :aspect aspect :region region
+                          :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
                           :zoom zoom :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate

@@ -150,6 +150,9 @@ options:
   --audio  MODE     record audio (capture/record): system (desktop), mic, or both
                     (default: off). Muxed into the mp4; survives capture->render.
   --ripples on|off  click ripples + cursor press animation (default on)
+  --trim-idle on    cut idle stretches (no screen change) to speed up demos;
+                    --idle-threshold S (gap to cut, default 1.2), --max-idle S
+                    (kept per gap, default 0.4). Drops audio for now.
 
 direction tuning (auto-zoom + cursor feel):
   --zoom   F              punch-in zoom factor for activity     (default 1.8)
@@ -183,6 +186,11 @@ option alist O, applying defaults. Shared by `record` and `render`."
                                                    '("off" "no" "false" "0") :test #'string=))))
           :aspect            (parse-aspect (opt o "aspect" nil))
           :region            (parse-region (opt o "region" nil))
+          :trim-idle         (let ((v (opt o "trim-idle" nil)))
+                               (and v (member (string-downcase (string-trim " " v))
+                                              '("on" "yes" "true" "1") :test #'string=) t))
+          :idle-threshold    (opt-num o "idle-threshold" 1.2)
+          :max-idle          (opt-num o "max-idle" 0.4)
           :corner            (opt-num o "corner-radius" 0.09)
           :cursor            (opt o "cursor" nil)
           :cursor-hotspot    (let ((s (opt o "cursor-hotspot" nil)))
