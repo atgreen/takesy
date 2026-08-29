@@ -6,9 +6,8 @@
 
 **takesy** records your screen and turns it into a polished screencast: it
 automatically zooms in on wherever you're working, smooths the cursor motion,
-and composites the result — padded background, rounded corners, drop shadow — to
-an mp4. No timeline, no manual keyframing; just record, and takesy directs the
-shot for you.
+and composites the result — padded background, rounded corners, drop shadow —
+into a finished mp4. You just record; takesy directs the shot.
 
 <p align="center"><img src="docs/demo.gif" alt="takesy recording demo" width="720"></p>
 
@@ -55,6 +54,7 @@ takesy                                 # record; click Stop in the top bar to fi
 takesy --output talk.mp4 --duration 20
 takesy --audio both                    # record desktop sound + mic too
 takesy --cursor arrow.png              # use a custom cursor image
+takesy --bg-image wallpaper.png        # put an image behind the inset
 takesy --output demo.gif               # straight to an animated GIF (no audio)
 takesy help
 ```
