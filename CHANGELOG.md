@@ -4,6 +4,47 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-08-29
+
+A big round of directing, compositing, and capture features, plus smarter
+zoom defaults.
+
+### Added
+
+- **Click ripples** — an expanding ring on each click with a subtle cursor
+  press animation (`--ripples on|off`, on by default), fed by best-effort
+  evdev click capture during recording.
+- **Blurred background** — `--bg blur` uses a frosted, blurred copy of the
+  screen as the backdrop.
+- **Social reframe** — `--aspect W:H` (e.g. `9:16`, `1:1`) reframes the output;
+  the whole screen is **scaled to fit** inside it (letterboxed), never cropped.
+- **`--margin F`** — configurable inset margin around the screen.
+- **Fixed-region capture** — `--region X,Y,W,H` frames a specific screen
+  rectangle instead of auto-cropping to content.
+- **Trim idle time** — `--trim-idle on` cuts dead stretches (no screen change)
+  to tighten long demos (`--idle-threshold`, `--max-idle`).
+- **Webcam picture-in-picture** — `--webcam PATH` composites a webcam
+  video/image as a circle-cropped inset (`--webcam-pos`, `--webcam-size`).
+- **Countdown** — `--countdown N` shows a 3-2-1 before recording starts.
+- **Pause / resume** — `kill -USR1 <pid>` toggles capture; paused time is cut
+  and the timeline stays gapless.
+- **`--zoom-min F`** — a floor zoom that forces a punch-in on activity too
+  spread out for the auto-fit (e.g. full-screen apps), centered on the action.
+
+### Changed
+
+- **Defaults**: the background is now **blur** (pass `--bg <colour>` for a
+  solid), and **`--zoom-min` defaults to 1.6** (pass `--zoom-min 0` to disable).
+- The auto-zoom now centers on **where the screen is changing** (the damage
+  centroid) rather than the mouse — so it frames the text you're typing even
+  when the pointer is idle elsewhere.
+- The clip now always **opens on the whole region** and eases into the zoom.
+
+### Fixed
+
+- `--aspect` cropped the screen instead of fitting it; it now letterboxes.
+- Renders that started with immediate activity opened already-zoomed.
+
 ## [1.0.0] - 2026-08-29
 
 First release. takesy records your screen and directs it into a polished
@@ -45,4 +86,5 @@ or GIF.
 - A killed run (SIGTERM/SIGINT) best-effort closes the portal session so it can't
   leave the desktop with a hidden cursor.
 
+[1.1.0]: https://github.com/atgreen/takesy/releases/tag/v1.1.0
 [1.0.0]: https://github.com/atgreen/takesy/releases/tag/v1.0.0
