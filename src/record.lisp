@@ -414,7 +414,7 @@ didn't know at write time, e.g. :click-times)."
     (with-standard-io-syntax (prin1 rec s))))
 
 (defun capture-recording (&key (duration 30.0) (fps 24) (dir "/tmp/takesy-rec")
-                               (audio nil) (capture-clicks t))
+                               (audio nil) (capture-clicks t) (countdown 3))
   "Capture stage only: pop the screen-share dialog and record until you end the
 share -- click GNOME's Stop button in the top bar -- or DURATION seconds elapse as
 a safety cap. Frames (and the compressed intermediate) are written under DIR, and
@@ -437,6 +437,10 @@ recording plist."
                    read access to /dev/input. Add yourself to the 'input' group:~%~
                    sudo usermod -aG input $USER  (then log out/in). Recording~%~
                    without click data for now.~%"))
+    ;; Countdown so you can get ready after picking the share source.
+    (when (and countdown (plusp countdown))
+      (loop for n from countdown downto 1
+            do (format t "  [capture] recording in ~D...~%" n) (finish-output) (sleep 1)))
     (let* ((done nil)
            ;; evdev click capture runs alongside the frame capture; base ~ capture
            ;; start so click times align with the frame timeline.
@@ -560,6 +564,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (region nil)
                            (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
                            (webcam nil) (webcam-pos :br) (webcam-size 0.22)
+                           (countdown 3)
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
@@ -571,7 +576,8 @@ capture the screen (METADATA cursor mode) until you click GNOME's Stop button (o
 DURATION as a safety cap), then auto-zoom and composite to OUT. Kept as the
 one-call path; the two halves are separately callable so a capture can be
 re-rendered. Return (values out n-frames)."
-  (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio)))
+  (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio
+                                :countdown countdown)))
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples

@@ -161,6 +161,7 @@ options:
   --audio  MODE     record audio (capture/record): system (desktop), mic, or both
                     (default: off). Muxed into the mp4; survives capture->render.
   --ripples on|off  click ripples + cursor press animation (default on)
+  --countdown N     count down N seconds before recording (capture/record; 0=off)
   --webcam PATH     composite a webcam video/image as a circle inset
   --webcam-pos POS  inset corner: br|bl|tr|tl (default br)
   --webcam-size F   inset diameter as a fraction of output height (default 0.22)
@@ -233,7 +234,8 @@ option alist O, applying defaults. Shared by `record` and `render`."
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
-    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir :audio audio)))
+    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir :audio audio
+                                        :countdown (opt-int o "countdown" 3))))
       (multiple-value-bind (path n) (apply #'rec:render-recording rec ra)
         (format t "done: wrote ~A (~D frames)~%" path n)
         (format t "  re-render this capture with: takesy render ~A [--bg ... --zoom ...]~%" dir)
@@ -251,7 +253,8 @@ can be rendered -- and re-rendered with different config -- later."
             dur fps audio dir)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish.~%")
-    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir :audio audio)))
+    (let ((rec (rec:capture-recording :duration dur :fps fps :dir dir :audio audio
+                                        :countdown (opt-int o "countdown" 3))))
       (format t "done: captured ~D frames to ~A~%" (length (getf rec :frames)) dir)
       (format t "  render it with: takesy render ~A [--output out.mp4 --bg ... --zoom ...]~%" dir)
       dir)))
