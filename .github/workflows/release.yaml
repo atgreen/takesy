@@ -183,7 +183,10 @@ jobs:
       - name: Install build dependencies
         run: |
           apt-get update
-          apt-get install -y debhelper devscripts sbcl gcc make libfixposix-dev gpg debsigs
+          apt-get install -y debhelper devscripts sbcl build-essential make gpg debsigs
+          # iolib's cffi-grovel shells out to pkg-config to locate libfixposix;
+          # Debian's toolchain doesn't include it (Fedora's does).
+          apt-get install -y pkg-config libfixposix-dev
           # Runtime libs the image loads (use-foreign-library) while asdf:make
           # dumps it -- must be present at build time, not just on the user's box.
           apt-get install -y libpipewire-0.3-0 libegl1 libgl1
