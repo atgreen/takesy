@@ -41,6 +41,9 @@
   ;; then, so negotiation latency doesn't shorten the clip -- bead am4.7).
   (record-start nil) (record-duration 0) (record-min-dt 0) (record-last nil)
   (record-budget 0) (max-frames 0) (n-saved 0) (frames '())
+  ;; streaming encoder (am4.18): frames piped to ffmpeg -> compressed intermediate
+  (want-encoder t)
+  (enc-proc nil) (enc-stream nil) (enc-fifo nil) (intermediate nil) (enc-fps 30)
   (done nil) (error nil) (n-empty 0))
 
 (defvar *cap* nil)
@@ -155,15 +158,93 @@ id /= 0 (valid cursor data)."
         (cffi:foreign-free curpod)
         (format t "  [pw] negotiated ~Dx~D fmt=~D~%" w h fmt)))))
 
-(defun %write-frame-raw (path dptr coff csize)
-  "memcpy CSIZE bytes at DPTR+COFF and write them to PATH (raw BGRx)."
+(defun %frame->vector (dptr coff csize)
+  "Copy CSIZE bytes at DPTR+COFF into a fresh (unsigned-byte 8) vector."
   (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
     (cffi:with-pointer-to-vector-data (dst vec)
       (cffi:foreign-funcall "memcpy" :pointer dst
                             :pointer (ptr+ dptr coff) :size csize :pointer))
-    (with-open-file (s path :direction :output :element-type '(unsigned-byte 8)
-                            :if-exists :supersede)
-      (write-sequence vec s))))
+    vec))
+
+(defun %write-frame-raw (path dptr coff csize)
+  "memcpy CSIZE bytes at DPTR+COFF and write them to PATH (raw BGRx)."
+  (with-open-file (s path :direction :output :element-type '(unsigned-byte 8)
+                          :if-exists :supersede)
+    (write-sequence (%frame->vector dptr coff csize) s)))
+
+;;; ------------------------------------------------------------------
+;;; Streaming encoder: pipe raw BGRx frames to ffmpeg via a FIFO -> a near-
+;;; lossless h264 intermediate, so long recordings don't hoard gigabytes of raw
+;;; frames (green-screen-am4.18). Best-effort: on any failure the caller falls
+;;; back to per-frame raw files.
+
+(defun %has-encoder (name)
+  (let ((out (with-output-to-string (s)
+               (ignore-errors
+                (uiop:run-program (list "ffmpeg" "-hide_banner" "-encoders")
+                                  :output s :error-output nil :ignore-error-status t)))))
+    (and (search name out) t)))
+
+(defun %pick-encoder ()
+  (cond ((%has-encoder "libx264") "libx264")
+        ((%has-encoder "libopenh264") "libopenh264")
+        (t nil)))
+
+(defun %start-encoder (cap w h)
+  "Launch ffmpeg reading rawvideo BGRx WxH from a FIFO into a compressed
+intermediate; store the pieces in CAP. Return T on success, NIL to fall back."
+  (let ((enc (%pick-encoder)))
+    (when enc
+      (handler-case
+          (let* ((base (capture-record-dir cap))
+                 (fifo (format nil "~A/frames.fifo" base))
+                 (out  (format nil "~A/source.mp4" base))
+                 (fps  (capture-enc-fps cap))
+                 (bitrate (min 40000000 (max 8000000 (round (* w h fps 0.2))))))
+            (ignore-errors (delete-file fifo))
+            (ignore-errors (delete-file out))
+            (uiop:run-program (list "mkfifo" fifo))
+            (let ((proc (uiop:launch-program
+                         (list "ffmpeg" "-y" "-loglevel" "error"
+                               "-f" "rawvideo" "-pix_fmt" "bgra"
+                               "-s" (format nil "~Dx~D" w h)
+                               "-r" (format nil "~D" fps) "-i" fifo
+                               "-c:v" enc "-b:v" (format nil "~D" bitrate)
+                               "-pix_fmt" "yuv420p" out)
+                         :output nil :error-output nil)))
+              (handler-case
+                  ;; opening the write end (of the existing FIFO -- hence
+                  ;; :if-exists) unblocks ffmpeg's FIFO read open. Only commit the
+                  ;; encoder fields once this succeeds, so a failure leaves nothing
+                  ;; dangling.
+                  (let ((stream (open fifo :direction :output
+                                           :element-type '(unsigned-byte 8)
+                                           :if-exists :append)))
+                    (setf (capture-enc-proc cap) proc
+                          (capture-enc-fifo cap) fifo
+                          (capture-intermediate cap) out
+                          (capture-enc-stream cap) stream)
+                    t)
+                (error ()
+                  ;; don't leave ffmpeg blocked forever on the FIFO
+                  (ignore-errors (uiop:terminate-process proc :urgent t))
+                  (ignore-errors (delete-file fifo))
+                  (ignore-errors (delete-file out))
+                  nil))))
+        (error () nil)))))
+
+(defun %stop-encoder (cap)
+  "Flush and close the encoder FIFO (EOF), wait for ffmpeg, remove the FIFO."
+  (when (capture-enc-stream cap)
+    (ignore-errors (finish-output (capture-enc-stream cap)))
+    (ignore-errors (close (capture-enc-stream cap)))
+    (setf (capture-enc-stream cap) nil))
+  (when (capture-enc-proc cap)
+    (ignore-errors (uiop:wait-process (capture-enc-proc cap)))
+    (setf (capture-enc-proc cap) nil))
+  (when (capture-enc-fifo cap)
+    (ignore-errors (delete-file (capture-enc-fifo cap)))
+    (setf (capture-enc-fifo cap) nil)))
 
 (defun %record-frame (cap stream b spabuf dptr csize cstride coff)
   "Recording-mode buffer handler: save throttled frames + per-frame cursor until
@@ -173,23 +254,33 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
     ;; actual capture, not shortened by portal/PipeWire negotiation (am4.7).
     (unless (capture-record-start cap)
       (setf (capture-record-start cap) now)
-      ;; Now the frame size is known: bound the frame count to the disk budget
-      ;; and SPREAD it across the requested duration, so a busy screen doesn't
-      ;; blow the budget in a few seconds (am4.17). We keep full-res frames and
-      ;; lower the rate rather than shrink them (sharpness > smoothness here).
-      (let* ((fbytes (max 1 csize))
-             (cap-frames (max 1 (floor (capture-record-budget cap) fbytes)))
-             (dur-units  (capture-record-duration cap))
-             (spread-dt  (if (plusp dur-units) (floor dur-units cap-frames) 0)))
-        (setf (capture-max-frames cap) cap-frames
-              (capture-record-min-dt cap)
-              (max (capture-record-min-dt cap) spread-dt))
-        (format t "  [pw] disk budget: up to ~D full-res frames ~
-                   (~,1F fps over ~,0Fs)~%"
-                cap-frames
-                (/ internal-time-units-per-second
-                   (float (max 1 (capture-record-min-dt cap)) 1.0))
-                (/ dur-units internal-time-units-per-second 1.0))))
+      ;; geometry from the real chunk (needed before starting the encoder)
+      (when (> cstride 0)
+        (setf (capture-stride cap) cstride
+              (capture-width cap)  (floor cstride 4)
+              (capture-height cap) (floor csize cstride)))
+      ;; Prefer streaming to a compressed intermediate (am4.18) -- then frames are
+      ;; small, so we capture at full rate for the whole duration. If it can't
+      ;; start, fall back to raw files bounded by the disk budget and spread over
+      ;; the duration (am4.17), keeping full-res frames but lowering the rate.
+      (when (capture-want-encoder cap)
+        (%start-encoder cap (capture-width cap) (capture-height cap)))
+      (if (capture-enc-stream cap)
+          (format t "  [pw] streaming to compressed intermediate -> ~A~%"
+                  (capture-intermediate cap))
+          (let* ((fbytes (max 1 csize))
+                 (cap-frames (max 1 (floor (capture-record-budget cap) fbytes)))
+                 (dur-units  (capture-record-duration cap))
+                 (spread-dt  (if (plusp dur-units) (floor dur-units cap-frames) 0)))
+            (setf (capture-max-frames cap) cap-frames
+                  (capture-record-min-dt cap)
+                  (max (capture-record-min-dt cap) spread-dt))
+            (format t "  [pw] no encoder -- disk budget: up to ~D full-res frames ~
+                       (~,1F fps over ~,0Fs)~%"
+                    cap-frames
+                    (/ internal-time-units-per-second
+                       (float (max 1 (capture-record-min-dt cap)) 1.0))
+                    (/ dur-units internal-time-units-per-second 1.0)))))
     (let ((deadline (+ (capture-record-start cap) (capture-record-duration cap))))
      (cond
       ;; safety caps: the max duration elapsed, or the frame backstop was hit
@@ -202,14 +293,14 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
        (pw-main-loop-quit (capture-loop cap)))
       ((or (null (capture-record-last cap))
            (>= (- now (capture-record-last cap)) (capture-record-min-dt cap)))
-       (when (> cstride 0)                 ; chunk geometry is ground truth
-         (setf (capture-stride cap) cstride
-               (capture-width cap)  (floor cstride 4)
-               (capture-height cap) (floor csize cstride)))
        (multiple-value-bind (cx cy) (read-cursor spabuf)
          (let* ((i    (capture-n-saved cap))
-                (path (format nil "~A/frame-~5,'0D.bgrx" (capture-record-dir cap) i)))
-           (%write-frame-raw path dptr coff csize)
+                (enc  (capture-enc-stream cap))
+                (path (unless enc
+                        (format nil "~A/frame-~5,'0D.bgrx" (capture-record-dir cap) i))))
+           (if enc                          ; stream to the encoder, else a raw file
+               (ignore-errors (write-sequence (%frame->vector dptr coff csize) enc))
+               (%write-frame-raw path dptr coff csize))
            (push (list :i i
                        :time (/ (float (- now (capture-record-start cap)) 1.0d0)
                                 internal-time-units-per-second)
@@ -332,6 +423,7 @@ callback error or quit never leaks the stream or leaves PipeWire initialized
              (cffi:foreign-free params)
              (cffi:foreign-free fmt-pod))
            (pw-main-loop-run mloop))
+      (%stop-encoder cap)               ; finalise the intermediate (no-op if unused)
       (ignore-errors (pw-stream-disconnect stream))
       (pw-stream-destroy stream)
       (pw-context-destroy ctx)
@@ -393,6 +485,7 @@ Return a plist (:width :height :stride :format :fps :dir :frames)."
                     :stride (capture-stride cap) :format (capture-format cap)
                     :fps max-fps :dir (capture-record-dir cap)
                     :cursor-meta (capture-cursor-meta-seen cap)
+                    :intermediate (capture-intermediate cap)  ; nil if raw fallback
                     :frames (nreverse (capture-frames cap)))))
         ;; Persist a manifest so the recording dir is self-contained and can be
         ;; reloaded later (load-recording) by the orchestrator / CLI.

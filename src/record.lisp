@@ -22,6 +22,60 @@
       (read-sequence v s)
       v)))
 
+;;; ------------------------------------------------------------------
+;;; Decoding the compressed capture intermediate (green-screen-am4.18). ffmpeg
+;;; decodes it to rawvideo BGRx through a FIFO we read sequentially; the compose
+;;; loop only ever needs non-decreasing source frames, so a forward stream (no
+;;; seeking) suffices.
+
+(defstruct decoder proc stream fifo nbytes (idx -1) buf)
+
+(defun %open-decoder (intermediate w h)
+  "Launch ffmpeg decoding INTERMEDIATE to a FIFO of rawvideo BGRx frames; return a
+DECODER. The read end is opened after launch so ffmpeg's blocking FIFO-write open
+unblocks."
+  (let* ((fifo (format nil "~A.dec.fifo" intermediate))
+         (nbytes (* w h 4)))
+    (ignore-errors (delete-file fifo))
+    (uiop:run-program (list "mkfifo" fifo))
+    (let ((proc (uiop:launch-program
+                 (list "ffmpeg" "-y" "-loglevel" "error" "-i" intermediate
+                       "-f" "rawvideo" "-pix_fmt" "bgra" fifo)
+                 :output nil :error-output nil)))
+      (make-decoder :proc proc
+                    :stream (open fifo :direction :input :element-type '(unsigned-byte 8))
+                    :fifo fifo :nbytes nbytes
+                    :buf (make-array nbytes :element-type '(unsigned-byte 8))))))
+
+(defun %decoder-frame (dec target-idx)
+  "Advance DEC to source frame TARGET-IDX (>= current) and return its bytes."
+  (loop while (< (decoder-idx dec) target-idx)
+        do (let ((got (read-sequence (decoder-buf dec) (decoder-stream dec))))
+             (when (< got (decoder-nbytes dec)) (return))   ; EOF -> hold last
+             (incf (decoder-idx dec))))
+  (decoder-buf dec))
+
+(defun %close-decoder (dec)
+  (when dec
+    (ignore-errors (close (decoder-stream dec)))
+    (ignore-errors (uiop:wait-process (decoder-proc dec)))
+    (ignore-errors (delete-file (decoder-fifo dec)))))
+
+(defun %map-frames (rec fn)
+  "Call (FN i bytes) for each source frame in order. Reads from the compressed
+intermediate (decoded forward) when present, else per-frame raw files. BYTES may
+be a reused buffer -- copy what you need before the next call."
+  (let* ((frames (coerce (getf rec :frames) 'vector))
+         (n (length frames))
+         (inter (getf rec :intermediate)))
+    (if inter
+        (let ((dec (%open-decoder inter (getf rec :width) (getf rec :height))))
+          (unwind-protect
+               (dotimes (i n) (funcall fn i (%decoder-frame dec i)))
+            (%close-decoder dec)))
+        (dotimes (i n)
+          (funcall fn i (%read-file-bytes (getf (aref frames i) :path)))))))
+
 (defun %frame-luma-grid (bytes w h gw gh)
   "Sample a GW x GH coarse luma grid (one pixel per cell) from a BGRx frame."
   (let ((g (make-array (* gw gh) :element-type 'fixnum)))
@@ -38,24 +92,27 @@
 track: (time x0 y0 x1 y1) UV bbox of changed cells, per frame that changed. This
 is what lets the Director size the zoom to real screen activity, not just the
 cursor."
-  (let* ((frames (getf rec :frames)) (w (getf rec :width)) (h (getf rec :height))
+  (let* ((fv (coerce (getf rec :frames) 'vector))
+         (w (getf rec :width)) (h (getf rec :height))
          (prev nil) (out '()))
-    (dolist (f frames (nreverse out))
-      (let ((cur (%frame-luma-grid (%read-file-bytes (getf f :path)) w h gw gh)))
-        (when prev
-          (let (minx miny maxx maxy)
-            (dotimes (cy gh)
-              (dotimes (cx gw)
-                (let ((k (+ (* cy gw) cx)))
-                  (when (> (abs (- (aref cur k) (aref prev k))) threshold)
-                    (setf minx (if minx (min minx cx) cx) maxx (if maxx (max maxx cx) cx)
-                          miny (if miny (min miny cy) cy) maxy (if maxy (max maxy cy) cy))))))
-            (when minx
-              (push (list (float (getf f :time) 1.0)
-                          (/ minx (float gw 1.0)) (/ miny (float gh 1.0))
-                          (/ (1+ maxx) (float gw 1.0)) (/ (1+ maxy) (float gh 1.0)))
-                    out))))
-        (setf prev cur)))))
+    (%map-frames rec
+      (lambda (i bytes)
+        (let ((cur (%frame-luma-grid bytes w h gw gh)))
+          (when prev
+            (let (minx miny maxx maxy)
+              (dotimes (cy gh)
+                (dotimes (cx gw)
+                  (let ((k (+ (* cy gw) cx)))
+                    (when (> (abs (- (aref cur k) (aref prev k))) threshold)
+                      (setf minx (if minx (min minx cx) cx) maxx (if maxx (max maxx cx) cx)
+                            miny (if miny (min miny cy) cy) maxy (if maxy (max maxy cy) cy))))))
+              (when minx
+                (push (list (float (getf (aref fv i) :time) 1.0)
+                            (/ minx (float gw 1.0)) (/ miny (float gh 1.0))
+                            (/ (1+ maxx) (float gw 1.0)) (/ (1+ maxy) (float gh 1.0)))
+                      out))))
+          (setf prev cur))))
+    (nreverse out)))
 
 (defun %sample-px (bytes w h fx fy)
   "Sample the BGRx pixel at fractional (FX,FY). Return (values b g r)."
@@ -78,22 +135,21 @@ cursor."
 background (e.g. an empty/black desktop around a window) -- unioned across up to
 SAMPLES frames. Return (list x0 y0 x1 y1) with MARGIN, or NIL when content
 already covers >= MIN-COVER of the frame (nothing worth cropping)."
-  (let* ((frames (coerce (getf rec :frames) 'vector))
-         (n (length frames)) (w (getf rec :width)) (h (getf rec :height)))
+  (let* ((n (length (getf rec :frames))) (w (getf rec :width)) (h (getf rec :height)))
     (when (zerop n) (return-from compute-content-bbox nil))
-    (let ((minx nil) (miny nil) (maxx nil) (maxy nil)
-          (k (max 1 (min samples n))))
-      (dotimes (s k)
-        (let* ((idx   (floor (* s n) k))
-               (bytes (%read-file-bytes (getf (aref frames idx) :path))))
-          (multiple-value-bind (bb bg br) (%bg-color bytes w h)
-            (dotimes (cy gh)
-              (dotimes (cx gw)
-                (multiple-value-bind (pb pg pr)
-                    (%sample-px bytes w h (/ (+ cx 0.5) gw) (/ (+ cy 0.5) gh))
-                  (when (> (+ (abs (- pb bb)) (abs (- pg bg)) (abs (- pr br))) threshold)
-                    (setf minx (if minx (min minx cx) cx) maxx (if maxx (max maxx cx) cx)
-                          miny (if miny (min miny cy) cy) maxy (if maxy (max maxy cy) cy)))))))))
+    (let* ((minx nil) (miny nil) (maxx nil) (maxy nil)
+           (stride (max 1 (floor n (max 1 (min samples n))))))
+      (%map-frames rec
+        (lambda (i bytes)
+          (when (zerop (mod i stride))    ; sample every stride-th frame
+            (multiple-value-bind (bb bg br) (%bg-color bytes w h)
+              (dotimes (cy gh)
+                (dotimes (cx gw)
+                  (multiple-value-bind (pb pg pr)
+                      (%sample-px bytes w h (/ (+ cx 0.5) gw) (/ (+ cy 0.5) gh))
+                    (when (> (+ (abs (- pb bb)) (abs (- pg bg)) (abs (- pr br))) threshold)
+                      (setf minx (if minx (min minx cx) cx) maxx (if maxx (max maxx cx) cx)
+                            miny (if miny (min miny cy) cy) maxy (if maxy (max maxy cy) cy))))))))))
       (when (null minx) (return-from compute-content-bbox nil))
       (let* ((x0 (/ minx (float gw 1.0))) (y0 (/ miny (float gh 1.0)))
              (x1 (/ (1+ maxx) (float gw 1.0))) (y1 (/ (1+ maxy) (float gh 1.0)))
@@ -172,19 +228,28 @@ without an over-large file."
         (format t "  [record] compositing ~D src frames -> ~D output frames ~
                    (~,1Fs @ ~Dfps) crop ~,2Fx~,2F of frame -> ~Dx~D~@[ +cursor~]~%"
                 nsrc nout dur fps (- cx1 cx0) (- cy1 cy0) ow oh cursor-fn)
-        (flet ((src (i)   ; nearest source frame for output time i/fps, cached
-                 (let ((idx (%nearest-frame-index frames (/ i (float fps 1.0)))))
-                   (unless (= idx cache-idx)
-                     (setf cache-idx idx
-                           cache-bytes (%read-file-bytes (getf (aref frames idx) :path))))
-                   cache-bytes)))
-          (comp:render-frame-sequence
-           timeline #'src nout ow oh
-           :fps fps :source-format :bgra
-           :source-width fw :source-height fh
-           :time-fn (lambda (i) (/ i (float fps 1.0)))
-           :cursor-fn cursor-fn :crop crop
-           :path out))))))
+        ;; source frames come from the compressed intermediate (decoded forward)
+        ;; when present, else per-frame raw files.
+        (let ((dec (when (getf rec :intermediate)
+                     (%open-decoder (getf rec :intermediate) fw fh))))
+          (unwind-protect
+               (flet ((src (i)   ; nearest source frame for output time i/fps
+                        (let ((idx (%nearest-frame-index frames (/ i (float fps 1.0)))))
+                          (if dec
+                              (%decoder-frame dec idx)
+                              (progn
+                                (unless (= idx cache-idx)
+                                  (setf cache-idx idx
+                                        cache-bytes (%read-file-bytes (getf (aref frames idx) :path))))
+                                cache-bytes)))))
+                 (comp:render-frame-sequence
+                  timeline #'src nout ow oh
+                  :fps fps :source-format :bgra
+                  :source-width fw :source-height fh
+                  :time-fn (lambda (i) (/ i (float fps 1.0)))
+                  :cursor-fn cursor-fn :crop crop
+                  :path out))
+            (%close-decoder dec)))))))
 
 (defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
                            (bg '(0.11 0.12 0.15))
