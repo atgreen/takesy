@@ -439,6 +439,12 @@ following the changing region) instead of static per-group punch-ins.")
   "Half-width (s) of the activity window sampled around each moment.")
 (defparameter *track-center-deadband* 0.012
   "UV deadband: target centre moves under this are ignored (anti-jitter).")
+(defparameter *track-linger* 1.6
+  "Seconds to HOLD a zoom after activity stops before easing back to wide. Keeps
+the camera from pumping in/out through brief pauses (e.g. between keystrokes).")
+(defparameter *track-zoom-out-omega* 2.0
+  "Zoom-OUT spring stiffness (rad/s) -- lower than zoom-in so easing out is gentle
+and unhurried, not a snap back to wide.")
 (defparameter *track-text-follow* 2.0
   "Recency bias when centring on damage: newer changes get up to (1+this)x weight,
 so the camera follows the leading edge of new content (the caret when typing).
@@ -502,6 +508,7 @@ closest content EDGE within TOL. The nudge is small, so the spring absorbs it."
                                    (omega-zoom *track-omega-zoom*)
                                    (anticipate *track-anticipate*)
                                    (window *track-window*)
+                                   (linger *track-linger*)
                                    (snap *track-snap*)
                                    (padding 0.04) (corner 0.09)
                                    (shadow-blur 0.03) (shadow-alpha 0.5)
@@ -516,6 +523,8 @@ the changing region over SESSION's duration. Covers pan tracking, adaptive
          (cx 0.5) (cy 0.5) (vx 0.0) (vy 0.0)
          (z 1.0) (vz 0.0)
          (tcx 0.5) (tcy 0.5)              ; last committed target centre (deadband)
+         ;; linger state: the zoomed shot to hold through brief pauses.
+         (last-active -1.0e9) (held-z 1.0) (held-cx 0.5) (held-cy 0.5)
          (kfs '()) (i 0))
     (flet ((frame (time zoom ccx ccy)
              (kf:make-keyframe :time (max 0.0 (min dur (float time 1.0)))
@@ -531,25 +540,39 @@ the changing region over SESSION's duration. Covers pan tracking, adaptive
                    ;; (anticipation) so the camera leads the action.
                    (%window-activity session (max 0.0 (- tm window))
                                      (min dur (+ tm anticipate window)))
-                 ;; target centre (deadband against micro-jitter) + target zoom.
-                 (when (> (+ (abs (- ax tcx)) (abs (- ay tcy))) *track-center-deadband*)
-                   (setf tcx ax tcy ay))
                  (let* ((zfit (if present
                                   (%fit-zoom spread spread zoom *zoom-fit-margin*)
                                   1.0))
-                        (tz (cond ((not present) 1.0)               ; idle -> wide
-                                  ((and zoom-min (> zoom-min zfit)) zoom-min)
-                                  (t zfit))))
-                   ;; Content-aware framing: nudge the target so the frame aligns
-                   ;; to window/panel edges (pre-spring, so it stays smooth).
-                   (when (and snap present (> tz 1.02))
-                     (let ((hw (/ 0.5 tz)))
-                       (setf tcx (%snap-1d tcx hw (session-edges-x session) *track-snap-tol*)
-                             tcy (%snap-1d tcy hw (session-edges-y session) *track-snap-tol*))))
-                   ;; advance the springs one step toward the targets
-                   (multiple-value-setq (cx vx) (spring-step cx vx tcx omega-pan dt))
-                   (multiple-value-setq (cy vy) (spring-step cy vy tcy omega-pan dt))
-                   (multiple-value-setq (z  vz) (spring-step z  vz tz  omega-zoom dt))
+                        (activez (cond ((and zoom-min (> zoom-min zfit)) zoom-min)
+                                       (t zfit))))
+                   ;; While activity is present and worth zooming, remember the
+                   ;; shot (zoom + centre) so we can HOLD it through brief pauses.
+                   (when (and present (> activez 1.02))
+                     (setf last-active tm held-z activez held-cx ax held-cy ay))
+                   (let* ((lingering (< (- tm last-active) linger))
+                          ;; zoom: active now, else hold while lingering, else wide.
+                          (tz (cond (present activez)
+                                    (lingering held-z)
+                                    (t 1.0)))
+                          ;; centre: track live activity, else the held shot (so
+                          ;; easing out doesn't also pan the frame around).
+                          (targ-cx (if present ax held-cx))
+                          (targ-cy (if present ay held-cy)))
+                     ;; commit target centre (deadband against micro-jitter)
+                     (when (> (+ (abs (- targ-cx tcx)) (abs (- targ-cy tcy)))
+                              *track-center-deadband*)
+                       (setf tcx targ-cx tcy targ-cy))
+                     ;; Content-aware framing: nudge the target to window/panel
+                     ;; edges (pre-spring, so it stays smooth).
+                     (when (and snap (> tz 1.02))
+                       (let ((hw (/ 0.5 tz)))
+                         (setf tcx (%snap-1d tcx hw (session-edges-x session) *track-snap-tol*)
+                               tcy (%snap-1d tcy hw (session-edges-y session) *track-snap-tol*))))
+                     ;; advance the springs; ease OUT more slowly than in.
+                     (multiple-value-setq (cx vx) (spring-step cx vx tcx omega-pan dt))
+                     (multiple-value-setq (cy vy) (spring-step cy vy tcy omega-pan dt))
+                     (multiple-value-setq (z  vz)
+                       (spring-step z vz tz (if (< tz z) *track-zoom-out-omega* omega-zoom) dt)))
                    (when (zerop (mod i emit-every))
                      (push (frame tm (max 1.0 z) cx cy) kfs))
                    (incf i))))
