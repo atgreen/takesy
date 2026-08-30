@@ -34,6 +34,7 @@
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
            #:*track* #:*track-omega-pan* #:*track-omega-zoom* #:*track-anticipate*
+           #:*track-text-follow*
            #:plan-tracked-timeline
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
@@ -435,6 +436,10 @@ following the changing region) instead of static per-group punch-ins.")
   "Half-width (s) of the activity window sampled around each moment.")
 (defparameter *track-center-deadband* 0.012
   "UV deadband: target centre moves under this are ignored (anti-jitter).")
+(defparameter *track-text-follow* 2.0
+  "Recency bias when centring on damage: newer changes get up to (1+this)x weight,
+so the camera follows the leading edge of new content (the caret when typing).
+0 = plain centroid.")
 
 (defun %window-activity (session t0 t1 &key (max-rect *damage-max-rect*))
   "Localized activity in [T0,T1]: return (values cx cy spread present-p) where
@@ -442,17 +447,22 @@ CX,CY is the centre (damage centroid, grown to include the cursor) and SPREAD is
 the max UV extent of the activity bbox. PRESENT-P is NIL when nothing localized
 is happening (idle -> the camera should ease back to wide)."
   (let ((w (session-width session)) (h (session-height session))
-        (sx 0.0) (sy 0.0) (n 0)
+        (sx 0.0) (sy 0.0) (sw 0.0) (n 0)          ; sw = sum of recency weights
+        (span (max 1e-3 (- t1 t0)))
         (x0 nil) (y0 nil) (x1 nil) (y1 nil))
     (flet ((acc (ax ay) (setf x0 (if x0 (min x0 ax) ax) y0 (if y0 (min y0 ay) ay)
                               x1 (if x1 (max x1 ax) ax) y1 (if y1 (max y1 ay) ay))))
       (dolist (d (session-damage session))
         (destructuring-bind (dt dx0 dy0 dx1 dy1) d
           (when (and (<= t0 dt t1) (<= (- dx1 dx0) max-rect) (<= (- dy1 dy0) max-rect))
-            (incf sx (* 0.5 (+ dx0 dx1))) (incf sy (* 0.5 (+ dy0 dy1))) (incf n)
+            ;; recency weight: newer damage counts more (text-follow / leading edge)
+            (let ((wt (+ 1.0 (* *track-text-follow* (/ (- dt t0) span)))))
+              (incf sx (* wt 0.5 (+ dx0 dx1))) (incf sy (* wt 0.5 (+ dy0 dy1)))
+              (incf sw wt))
+            (incf n)
             (acc dx0 dy0) (acc dx1 dy1))))
       (if (plusp n)
-          (let ((ccx (/ sx n)) (ccy (/ sy n)))
+          (let ((ccx (/ sx sw)) (ccy (/ sy sw)))
             ;; keep the pointer in frame: grow the bbox toward the cursor a little
             (multiple-value-bind (curx cury) (cursor-at session (* 0.5 (+ t0 t1)))
               (when curx (acc (/ curx w) (/ cury h))))
