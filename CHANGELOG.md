@@ -4,7 +4,7 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-08-30
 
 ### Changed
 
@@ -111,5 +111,6 @@ or GIF.
 - A killed run (SIGTERM/SIGINT) best-effort closes the portal session so it can't
   leave the desktop with a hidden cursor.
 
+[1.2.0]: https://github.com/atgreen/takesy/releases/tag/v1.2.0
 [1.1.0]: https://github.com/atgreen/takesy/releases/tag/v1.1.0
 [1.0.0]: https://github.com/atgreen/takesy/releases/tag/v1.0.0

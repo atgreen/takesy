@@ -126,7 +126,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--bg-image PATH` | background image (PNG or anything ffmpeg reads), cover-fit behind the inset; overrides `--bg` | — |
 | `--aspect W:H` | reframe the output to an aspect (e.g. `9:16` vertical, `1:1` square); the screen is scaled to fit inside it (letterboxed, never cropped) | content aspect |
 | `--region X,Y,W,H` | frame a fixed screen region (source pixels) instead of auto-cropping to content | auto-crop |
-| `--trim-idle on` | cut idle stretches (no screen change) longer than `--idle-threshold` down to `--max-idle` seconds; tightens long demos (drops audio for now) | off |
+| `--trim-idle` | cut idle stretches (no screen change) longer than `--idle-threshold` down to `--max-idle` seconds; tightens long demos (drops audio for now) | off |
 | `--webcam PATH` | composite a webcam video/image as a circle inset (`--webcam-pos br\|bl\|tr\|tl`, `--webcam-size` fraction of height) | — |
 | `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
 | `--margin F` | inset margin around the screen, as a fraction of the frame | `0.04` |

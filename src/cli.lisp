@@ -14,7 +14,7 @@
 
 (in-package #:takesy/cli)
 
-(defparameter *version* "1.1.0"
+(defparameter *version* "1.2.0"
   "takesy version string, surfaced via `takesy --version`.")
 
 ;;; ------------------------------------------------------------------
