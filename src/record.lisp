@@ -283,6 +283,51 @@ centered."
           (let ((halfv (/ (* 0.5 (/ cw target)) fh)))
             (list x0 (max 0.0 (- cy halfv)) x1 (min 1.0 (+ cy halfv))))))))
 
+(defun %grad-peaks (grad n &key (k 1.2))
+  "Indices of GRAD (length N) that are local maxima above mean + K*stddev, as UV
+positions (index/N). Strong content edges."
+  (let* ((mean (/ (reduce #'+ grad) n))
+         (var (/ (reduce #'+ (map 'list (lambda (v) (expt (- v mean) 2)) grad)) n))
+         (thr (+ mean (* k (sqrt var)))) (out '()))
+    (loop for i from 1 below (1- n)
+          when (and (> (aref grad i) thr)
+                    (>= (aref grad i) (aref grad (1- i)))
+                    (>  (aref grad i) (aref grad (1+ i))))
+            do (push (/ (+ i 0.5) n) out))
+    (nreverse out)))
+
+(defun compute-edges (rec &key (gw 96) (gh 60) (samples 6))
+  "Detect strong vertical/horizontal content edges (window/UI-panel boundaries)
+from the mean of a few sampled frames' coarse luma. Return (values xs ys), sorted
+UV edge positions in full-frame coordinates."
+  (let* ((w (getf rec :width)) (h (getf rec :height))
+         (n (length (getf rec :frames))))
+    (when (or (zerop n) (zerop w) (zerop h)) (return-from compute-edges (values '() '())))
+    (let ((acc (make-array (* gw gh) :initial-element 0)) (cnt 0)
+          (stride (max 1 (floor n (max 1 (min samples n))))))
+      (%map-frames rec
+        (lambda (i bytes)
+          (when (zerop (mod i stride))
+            (let ((g (%frame-luma-grid bytes w h gw gh)))
+              (dotimes (k (* gw gh)) (incf (aref acc k) (aref g k))))
+            (incf cnt))))
+      (when (zerop cnt) (return-from compute-edges (values '() '())))
+      (flet ((cell (x y) (/ (aref acc (+ (* y gw) x)) (float cnt 1.0))))
+        (let ((colg (make-array gw :initial-element 0.0))
+              (rowg (make-array gh :initial-element 0.0)))
+          (loop for x from 1 below gw do
+            (loop for y below gh do (incf (aref colg x) (abs (- (cell x y) (cell (1- x) y))))))
+          (loop for y from 1 below gh do
+            (loop for x below gw do (incf (aref rowg y) (abs (- (cell x y) (cell x (1- y)))))))
+          (values (%grad-peaks colg gw) (%grad-peaks rowg gh)))))))
+
+(defun %edges-in-crop (edges c0 c1)
+  "Re-express full-frame UV EDGES as crop-relative UV over [C0,C1], dropping any
+outside the crop."
+  (let ((d (- c1 c0)))
+    (loop for e in edges for u = (/ (- e c0) d)
+          when (<= 0.0 u 1.0) collect u)))
+
 (defun recording->session (rec &optional (crop '(0.0 0.0 1.0 1.0)))
   "Build a Director SESSION from a capture recording plist. CROP (x0 y0 x1 y1 in
 source UV) reframes the session onto just the content region: the session
@@ -480,6 +525,7 @@ recording plist."
                                   (zoom dir:*zoom-level*)
                                   (zoom-min dir:*zoom-min*)
                                   (track dir:*track*)
+                                  (snap dir:*track-snap*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
@@ -498,6 +544,7 @@ different config. Return (values out n-frames)."
   (let ((dir:*zoom-level*        zoom)
         (dir:*zoom-min*          zoom-min)
         (dir:*track*             track)
+        (dir:*track-snap*        snap)
         (dir:*zoom-merge-gap*    zoom-merge-gap)
         (dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
@@ -514,9 +561,17 @@ different config. Return (values out n-frames)."
                            (t '(0.0 0.0 1.0 1.0))))
            (session  (recording->session rec crop))
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
-           (timeline (progn (setf (dir:session-damage session) damage)
-                            (dir:plan-timeline session :bg bg :corner corner
-                                               :padding margin)))  ; fit zoom to activity
+           (timeline (progn
+                       (setf (dir:session-damage session) damage)
+                       ;; content-aware framing (opt-in): detect window/panel edges
+                       ;; so the tracked camera can snap the frame to them.
+                       (when snap
+                         (destructuring-bind (cx0 cy0 cx1 cy1) crop
+                           (multiple-value-bind (exs eys) (compute-edges rec)
+                             (setf (dir:session-edges-x session) (%edges-in-crop exs cx0 cx1)
+                                   (dir:session-edges-y session) (%edges-in-crop eys cy0 cy1)))))
+                       (dir:plan-timeline session :bg bg :corner corner
+                                          :padding margin)))  ; fit zoom to activity
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)
@@ -580,6 +635,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (zoom dir:*zoom-level*)
                            (zoom-min dir:*zoom-min*)
                            (track dir:*track*)
+                           (snap dir:*track-snap*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
                            (cursor-anticipate dir:*cursor-anticipate*)
@@ -597,7 +653,7 @@ re-rendered. Return (values out n-frames)."
                           :aspect aspect :region region
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
                           :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
-                          :zoom zoom :zoom-min zoom-min :track track :zoom-merge-gap zoom-merge-gap
+                          :zoom zoom :zoom-min zoom-min :track track :snap snap :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
                           :out out)))

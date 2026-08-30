@@ -176,6 +176,7 @@ direction tuning (auto-zoom + cursor feel):
                           (full-screen apps), centered on cursor (default 1.6; <=1 off)
   --track on|off          smooth camera that pans/zooms to follow the changing
                           region (default on; off = static per-activity punch-ins)
+  --snap on               align the tracked frame to window/panel edges (default off)
   --zoom-merge-gap S      idle gap below which zoom pans instead
                           of zooming out and back in            (default 2.5)
   --cursor-omega-fast R   cursor-spring stiffness when moving
@@ -229,6 +230,9 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :track             (let ((v (opt o "track" nil)))
                                (not (and v (member (string-downcase (string-trim " " v))
                                                    '("off" "no" "false" "0") :test #'string=))))
+          :snap              (let ((v (opt o "snap" nil)))
+                               (and v (member (string-downcase (string-trim " " v))
+                                              '("on" "yes" "true" "1") :test #'string=) t))
           :zoom-merge-gap    (opt-num o "zoom-merge-gap" 2.5)
           :cursor-omega-fast (opt-num o "cursor-omega-fast" 30.0)
           :cursor-anticipate (opt-num o "cursor-anticipate" 0.4)

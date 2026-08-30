@@ -22,7 +22,8 @@
            #:input-event-time #:input-event-kind #:input-event-x #:input-event-y
            #:session #:make-session #:session-p
            #:session-width #:session-height #:session-cursor #:session-events
-           #:session-damage #:session-duration #:*zoom-fit-margin*
+           #:session-damage #:session-edges-x #:session-edges-y
+           #:session-duration #:*zoom-fit-margin* #:*track-snap*
            #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
            #:*cursor-omega-slow* #:*cursor-omega-fast* #:*cursor-speed-ref*
            #:*cursor-anticipate* #:spring-step #:ease-cursor
@@ -56,7 +57,9 @@
   (width 1920) (height 1200)
   (cursor '())   ; list of cursor-sample, ascending time
   (events '())   ; list of input-event, ascending time
-  (damage '()))  ; list of (time x0 y0 x1 y1), changed-region UV bbox per frame
+  (damage '())   ; list of (time x0 y0 x1 y1), changed-region UV bbox per frame
+  (edges-x '())  ; sorted UV x of strong vertical content edges (panel boundaries)
+  (edges-y '())) ; sorted UV y of strong horizontal content edges
 
 (defun session-duration (s)
   "Wall-clock span of the session's cursor track, in seconds."
@@ -472,12 +475,34 @@ is happening (idle -> the camera should ease back to wide)."
             (if curx (values (/ curx w) (/ cury h) 0.0 nil)
                 (values 0.5 0.5 0.0 nil)))))))
 
+(defparameter *track-snap* nil
+  "When true (and content edges are known), gently align the tracked frame to the
+enclosing window/UI-panel boundaries.")
+(defparameter *track-snap-tol* 0.05
+  "Max UV nudge allowed when snapping a frame edge to a content edge.")
+
+(defun %nearest (x xs)
+  "Nearest value in list XS to X, or NIL if XS is empty."
+  (when xs (let ((best (first xs)))
+             (dolist (v (rest xs) best) (when (< (abs (- v x)) (abs (- best x))) (setf best v))))))
+
+(defun %snap-1d (c hw edges tol)
+  "Nudge centre C (window half-width HW) so the window's nearer edge aligns to the
+closest content EDGE within TOL. The nudge is small, so the spring absorbs it."
+  (if (null edges) c
+      (let* ((el (%nearest (- c hw) edges)) (er (%nearest (+ c hw) edges))
+             (dl (if el (- el (- c hw)) 1e9)) (dr (if er (- er (+ c hw)) 1e9)))
+        (cond ((and (< (abs dl) tol) (<= (abs dl) (abs dr))) (+ c dl))
+              ((< (abs dr) tol) (+ c dr))
+              (t c)))))
+
 (defun plan-tracked-timeline (session
                               &key (zoom *zoom-level*) (zoom-min *zoom-min*)
                                    (omega-pan *track-omega-pan*)
                                    (omega-zoom *track-omega-zoom*)
                                    (anticipate *track-anticipate*)
                                    (window *track-window*)
+                                   (snap *track-snap*)
                                    (padding 0.04) (corner 0.09)
                                    (shadow-blur 0.03) (shadow-alpha 0.5)
                                    (bg '(0.11 0.12 0.15)))
@@ -515,6 +540,12 @@ the changing region over SESSION's duration. Covers pan tracking, adaptive
                         (tz (cond ((not present) 1.0)               ; idle -> wide
                                   ((and zoom-min (> zoom-min zfit)) zoom-min)
                                   (t zfit))))
+                   ;; Content-aware framing: nudge the target so the frame aligns
+                   ;; to window/panel edges (pre-spring, so it stays smooth).
+                   (when (and snap present (> tz 1.02))
+                     (let ((hw (/ 0.5 tz)))
+                       (setf tcx (%snap-1d tcx hw (session-edges-x session) *track-snap-tol*)
+                             tcy (%snap-1d tcy hw (session-edges-y session) *track-snap-tol*))))
                    ;; advance the springs one step toward the targets
                    (multiple-value-setq (cx vx) (spring-step cx vx tcx omega-pan dt))
                    (multiple-value-setq (cy vy) (spring-step cy vy tcy omega-pan dt))
