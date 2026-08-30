@@ -77,7 +77,7 @@
 
 (asdf:defsystem "takesy/cli"
   :description "takesy command-line entry point (build the executable with `make`)."
-  :depends-on ("takesy/record")
+  :depends-on ("takesy/record" "clingon")
   :serial t
   :components ((:module "src"
                 :components ((:file "cli")))))

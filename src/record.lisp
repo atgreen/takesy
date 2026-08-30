@@ -11,6 +11,7 @@
   (:use #:cl)
   (:local-nicknames (#:portal #:takesy/portal) (#:pw #:takesy/pipewire)
                     (#:dir #:takesy/director) (#:comp #:takesy/compositor)
+                    (#:kf #:takesy/keyframe)
                     (#:evdev #:takesy/evdev))
   (:export #:recording->session #:compute-damage #:compute-content-bbox
            #:compose-recording #:record-to-mp4 #:load-image-rgba
@@ -344,7 +345,11 @@ the crop origin, so the Director works in cropped space."
                                     :time (float (getf f :time) 1.0)
                                     :x (- (float (getf f :cursor-x) 1.0) ox)
                                     :y (- (float (getf f :cursor-y) 1.0) oy)))))
-      (dir:make-session :width cw :height ch :cursor cursor :events '()))))
+      (dir:make-session :width cw :height ch :cursor cursor :events '()
+                        ;; click times (positioned later via the cursor track); the
+                        ;; strongest attention evidence for the shot planner.
+                        :clicks (mapcar (lambda (tc) (float tc 1.0))
+                                        (getf rec :click-times))))))
 
 (defun %crop-damage (damage crop)
   "Re-express DAMAGE rects (full-frame UV) in CROP-relative UV, dropping any that
@@ -366,6 +371,42 @@ the first. FRAMES is a vector in ascending :time order."
           do (setf idx i))
     idx))
 
+(defun %write-camera-log (path timeline nout fps src-time)
+  "Write the per-output-frame camera path to PATH as CSV, sampling TIMELINE exactly
+as the compositor does (at each output frame's source time). Columns: frame,
+t_out, t_src, zoom, cx, cy, pan_per_s, dzoom_per_s. Also print a compact motion
+summary -- the moments of sharpest zoom and pan change -- so the 'wild trip'
+stretches are easy to spot. Returns the list of (t_out zoom cx cy) samples."
+  (let ((rows '()) (px nil) (py nil) (pz nil)
+        (max-pan 0.0) (max-pan-t 0.0) (max-dz 0.0) (max-dz-t 0.0)
+        (reversals 0) (prev-dz-sign 0))
+    (with-open-file (s path :direction :output
+                            :if-exists :supersede :if-does-not-exist :create)
+      (format s "frame,t_out,t_src,zoom,cx,cy,pan_per_s,dzoom_per_s~%")
+      (dotimes (i nout)
+        (let* ((tout (/ i (float fps 1.0)))
+               (tsrc (funcall src-time i))
+               (k (kf:sample-timeline timeline tsrc))
+               (z (kf:keyframe-zoom k))
+               (x (kf:keyframe-center-x k))
+               (y (kf:keyframe-center-y k))
+               (pan (if px (* fps (sqrt (+ (expt (- x px) 2) (expt (- y py) 2)))) 0.0))
+               (dz  (if pz (* fps (- z pz)) 0.0)))
+          (format s "~D,~,3F,~,3F,~,4F,~,4F,~,4F,~,4F,~,4F~%" i tout tsrc z x y pan dz)
+          (push (list tout z x y) rows)
+          (when (> pan max-pan) (setf max-pan pan max-pan-t tout))
+          (when (> (abs dz) max-dz) (setf max-dz (abs dz) max-dz-t tout))
+          (let ((sign (cond ((> dz 0.02) 1) ((< dz -0.02) -1) (t 0))))
+            (when (and (/= sign 0) (/= prev-dz-sign 0) (/= sign prev-dz-sign))
+              (incf reversals))
+            (unless (zerop sign) (setf prev-dz-sign sign)))
+          (setf px x py y pz z))))
+    (format t "  [camera-log] wrote ~D samples -> ~A~%" nout path)
+    (format t "  [camera-log] peak pan ~,2F/s @ ~,1Fs; peak zoom-rate ~,2F/s @ ~,1Fs; ~
+               ~D zoom-direction reversals~%"
+            max-pan max-pan-t max-dz max-dz-t reversals)
+    (nreverse rows)))
+
 (defun compose-recording (rec timeline &key (out "/tmp/takesy-record.mp4") (max-height 1200)
                                             (fps 24) (duration nil)
                                             (cursor-session nil)
@@ -379,6 +420,7 @@ the first. FRAMES is a vector in ascending :time order."
                                             (audio nil)
                                             (time-warp nil) (out-duration nil)
                                             (aspect nil)
+                                            (camera-log nil)
                                             (crop '(0.0 0.0 1.0 1.0)))
   "Render REC's real BGRx frames through the compositor driven by TIMELINE, at a
 STEADY output FPS over DURATION seconds (default: the captured time span). Static
@@ -415,6 +457,8 @@ without an over-large file."
         (format t "  [record] compositing ~D src frames -> ~D output frames ~
                    (~,1Fs @ ~Dfps) crop ~,2Fx~,2F of frame -> ~Dx~D~@[ +cursor~]~%"
                 nsrc nout dur fps (- cx1 cx0) (- cy1 cy0) ow oh cursor-fn)
+        (when camera-log
+          (%write-camera-log camera-log timeline nout fps src-time))
         ;; source frames come from the compressed intermediate (decoded forward)
         ;; when present, else per-frame raw files.
         ;; Optional webcam PiP: decode WEBCAM forward, mapping output time to the
@@ -522,43 +566,21 @@ recording plist."
                                   (region nil)
                                   (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
                                   (webcam nil) (webcam-pos :br) (webcam-size 0.22)
-                                  (zoom dir:*zoom-level*)
-                                  (zoom-min dir:*zoom-min*)
-                                  (track dir:*track*)
-                                  (snap dir:*track-snap*)
-                                  (linger dir:*track-linger*)
-                                  (pan-speed dir:*track-omega-pan*)
-                                  (zoom-speed dir:*track-omega-zoom*)
-                                  (zoom-out-speed dir:*track-zoom-out-omega*)
-                                  (track-anticipate dir:*track-anticipate*)
-                                  (text-follow dir:*track-text-follow*)
-                                  (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
+                                  (camera-log nil)
                                   (out "/tmp/takesy-record.mp4"))
-  "Direct + composite stages: auto-zoom REC via the Director (dwell-based) and
-render its real captured frames to a full-length mp4 at OUT, with the eased cursor
-overlay. FPS is the OUTPUT rate; static stretches hold the last frame. The output
-length is the ACTUAL captured span. ZOOM, ZOOM-MERGE-GAP, CURSOR-OMEGA-FAST, and
-CURSOR-ANTICIPATE tune the direction (they bind the Director specials for this
-render); CORNER is the rounded-corner radius (fraction of the min content dim; 0 =
+  "Direct + composite stages: direct REC via the editorial camera and render its
+real captured frames to a full-length mp4 at OUT, with the eased cursor overlay.
+FPS is the OUTPUT rate; static stretches hold the last frame. The output length is
+the ACTUAL captured span. CURSOR-OMEGA-FAST and CURSOR-ANTICIPATE tune the cursor
+easing; CORNER is the rounded-corner radius (fraction of the min content dim; 0 =
 square corners). CURSOR, if given, is a path to an image drawn in place of the
 built-in arrow, with CURSOR-HOTSPOT (cons hx . hy, fraction of the image) as the
 click point and CURSOR-SIZE its height as a fraction of the output height. Pure
 function of REC -- no capture -- so it can be re-run against one capture with
 different config. Return (values out n-frames)."
-  (let ((dir:*zoom-level*        zoom)
-        (dir:*zoom-min*          zoom-min)
-        (dir:*track*             track)
-        (dir:*track-snap*        snap)
-        (dir:*track-linger*      linger)
-        (dir:*track-omega-pan*   pan-speed)
-        (dir:*track-omega-zoom*  zoom-speed)
-        (dir:*track-zoom-out-omega* zoom-out-speed)
-        (dir:*track-anticipate*  track-anticipate)
-        (dir:*track-text-follow* text-follow)
-        (dir:*zoom-merge-gap*    zoom-merge-gap)
-        (dir:*cursor-omega-fast* cursor-omega-fast)
+  (let ((dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
         (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image)))))
@@ -575,15 +597,8 @@ different config. Return (values out n-frames)."
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
            (timeline (progn
                        (setf (dir:session-damage session) damage)
-                       ;; content-aware framing (opt-in): detect window/panel edges
-                       ;; so the tracked camera can snap the frame to them.
-                       (when snap
-                         (destructuring-bind (cx0 cy0 cx1 cy1) crop
-                           (multiple-value-bind (exs eys) (compute-edges rec)
-                             (setf (dir:session-edges-x session) (%edges-in-crop exs cx0 cx1)
-                                   (dir:session-edges-y session) (%edges-in-crop eys cy0 cy1)))))
                        (dir:plan-timeline session :bg bg :corner corner
-                                          :padding margin)))  ; fit zoom to activity
+                                          :padding margin)))  ; editorial shot plan
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)
@@ -607,6 +622,7 @@ different config. Return (values out n-frames)."
       ;; length by when you click Stop).
       (compose-recording rec timeline :out out :max-height max-height
                          :fps fps :cursor-session eased :crop crop :aspect aspect
+                         :camera-log camera-log
                          :cursor-image cursor-image
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
                          :bg-image bg-image-data :bg-blur bg-blur
@@ -644,25 +660,15 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                            (countdown 3)
                            (audio nil)
-                           (zoom dir:*zoom-level*)
-                           (zoom-min dir:*zoom-min*)
-                           (track dir:*track*)
-                           (snap dir:*track-snap*)
-                           (linger dir:*track-linger*)
-                           (pan-speed dir:*track-omega-pan*)
-                           (zoom-speed dir:*track-omega-zoom*)
-                           (zoom-out-speed dir:*track-zoom-out-omega*)
-                           (track-anticipate dir:*track-anticipate*)
-                           (text-follow dir:*track-text-follow*)
-                           (zoom-merge-gap dir:*zoom-merge-gap*)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
                            (cursor-anticipate dir:*cursor-anticipate*)
+                           (camera-log nil)
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
   "Full `takesy record`: CAPTURE-RECORDING then RENDER-RECORDING in one shot --
 capture the screen (METADATA cursor mode) until you click GNOME's Stop button (or
-DURATION as a safety cap), then auto-zoom and composite to OUT. Kept as the
-one-call path; the two halves are separately callable so a capture can be
-re-rendered. Return (values out n-frames)."
+DURATION as a safety cap), then direct and composite to OUT. Kept as the one-call
+path; the two halves are separately callable so a capture can be re-rendered.
+Return (values out n-frames)."
   (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio
                                 :countdown countdown)))
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner :margin margin
@@ -671,10 +677,7 @@ re-rendered. Return (values out n-frames)."
                           :aspect aspect :region region
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
                           :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
-                          :zoom zoom :zoom-min zoom-min :track track :snap snap :zoom-merge-gap zoom-merge-gap
-                          :linger linger :pan-speed pan-speed :zoom-speed zoom-speed
-                          :zoom-out-speed zoom-out-speed :track-anticipate track-anticipate
-                          :text-follow text-follow
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
+                          :camera-log camera-log
                           :out out)))

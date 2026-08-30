@@ -4,6 +4,31 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Editorial camera** — the auto-zoom is rebuilt as an evidence-ranked shot
+  planner: it ranks attention (clicks > sustained localized activity > cursor),
+  picks shots from a small vocabulary (overview / working / detail), holds each
+  shot with a cooldown and hysteresis, moves in single composed eased gestures,
+  establishes wide first, widens *through* the overview on large jumps, and won't
+  chase brief flashes/popups. Far calmer and more legible than the previous
+  spring-follower.
+- **CLI is now built on clingon** with per-command options and `--version`.
+
+### Added
+
+- **`--log-camera PATH`** — write the per-frame camera path (zoom/pan) to CSV and
+  print a motion summary.
+
+### Removed
+
+- The legacy spring-follower director and its tuning options (`--zoom`,
+  `--zoom-min`, `--track`, `--snap`, `--track-linger`, `--pan-speed`,
+  `--zoom-speed`, `--zoom-out-speed`, `--track-anticipate`, `--text-follow`,
+  `--zoom-merge-gap`) — the editorial camera needs no per-move knobs.
+
 ## [1.1.0] - 2026-08-29
 
 A big round of directing, compositing, and capture features, plus smarter

@@ -3,6 +3,7 @@ asdf-package-system, ghcr.io/ocicl/asdf-package-system@sha256:dfacc260786f4e9e2a
 babel, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel.asd
 babel-streams, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel-streams.asd
 babel-tests, ghcr.io/ocicl/babel@sha256:9d9fcde71acc2b5c39572de4f11756a08c1d8801caa86c581b85dabaa35928b3, babel-20250905-4eaf3f2/babel-tests.asd
+bobbin, ghcr.io/ocicl/bobbin@sha256:7368d88e9f1d8a94b9bddf5e1887e384ef738235570142dd1cfe98c90077cc13, bobbin-20240503-b454e82/bobbin.asd
 bordeaux-threads, ghcr.io/ocicl/bordeaux-threads@sha256:bbb32afe3987e102149cc019f4f7366a05f7a37d1503f5f86a27745e671c320a, bordeaux-threads-0.9.4/bordeaux-threads.asd
 cffi, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/cffi.asd
 cffi-examples, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/cffi-examples.asd
@@ -18,7 +19,13 @@ cl-opengl, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf9
 cl-opengl-examples, ghcr.io/ocicl/cl-opengl@sha256:514a007da3ba3ac9d34e0d10b301dffcbd4bf94fea992d075d7df705eb5ce7b3, cl-opengl-20260812-6a4b55d/cl-opengl-examples.asd
 cl-ppcre, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre.asd
 cl-ppcre-unicode, ghcr.io/ocicl/cl-ppcre@sha256:bf073924cf4fd5957a4fd961a95d446ed0e53fa32a5002cbd2d52182874f45e5, cl-ppcre-20250606-a2ea581/cl-ppcre-unicode.asd
+cl-reexport, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport.asd
+cl-reexport-test, ghcr.io/ocicl/cl-reexport@sha256:c795feb3e3727a19e61797187eb31bac1e855b1332335d26752200a28e9b9da8, cl-reexport-20240503-03ad7a0/cl-reexport-test.asd
 cl-xmlspam, ghcr.io/ocicl/cl-xmlspam@sha256:29d1f6c42bce8c5979b594f578ebc609f517ef9fb16e7cc04789a5058e54db8b, cl-xmlspam-20240503-421ee97/cl-xmlspam.asd
+clingon, ghcr.io/ocicl/clingon@sha256:27d1426613e66fd28223c737bd7886dfdd4f20df742212bd0903c2fc6791871f, clingon-20260807-e7e936b/clingon.asd
+clingon.demo, ghcr.io/ocicl/clingon@sha256:27d1426613e66fd28223c737bd7886dfdd4f20df742212bd0903c2fc6791871f, clingon-20260807-e7e936b/clingon.demo.asd
+clingon.intro, ghcr.io/ocicl/clingon@sha256:27d1426613e66fd28223c737bd7886dfdd4f20df742212bd0903c2fc6791871f, clingon-20260807-e7e936b/clingon.intro.asd
+clingon.test, ghcr.io/ocicl/clingon@sha256:27d1426613e66fd28223c737bd7886dfdd4f20df742212bd0903c2fc6791871f, clingon-20260807-e7e936b/clingon.test.asd
 closure-common, ghcr.io/ocicl/closure-common@sha256:eb9f9a5587c663bec331f3ff56bc1eecbbebaae1495f7841b417200916973a93, closure-common-20240503-e3c5f5f/closure-common.asd
 cxml, ghcr.io/ocicl/cxml@sha256:a227da3554997482aa5fcefca12462234febca1200b40918cbe90b4681b36981, cxml-20250429-2d8fa42/cxml.asd
 cxml-dom, ghcr.io/ocicl/cxml@sha256:a227da3554997482aa5fcefca12462234febca1200b40918cbe90b4681b36981, cxml-20250429-2d8fa42/cxml-dom.asd
@@ -52,3 +59,4 @@ trivial-gray-streams, ghcr.io/ocicl/trivial-gray-streams@sha256:9d702556e5973fd1
 trivial-gray-streams-test, ghcr.io/ocicl/trivial-gray-streams@sha256:9d702556e5973fd18e67642b18bd5a2f901972ef7d5b134615e2f5fd77396bb9, trivial-gray-streams-20260818-257d73e/trivial-gray-streams-test.asd
 trivial-indent, ghcr.io/ocicl/trivial-indent@sha256:f836220f8b42c9fef8e8e48e94ffa4435be2a743d5c668ae889304a6ac1e29d2, trivial-indent-20260812-5905ac0/trivial-indent.asd
 uffi, ghcr.io/ocicl/cffi-grovel@sha256:7072c620dda3331a746259217bf03aec289e471699d1dce4fd38d94cd673c3c9, cffi-20260821-787d3cd/uffi-compat/uffi.asd
+with-user-abort, ghcr.io/ocicl/with-user-abort@sha256:c19560034f9909a7afb4110b5efd939a9f1e829d9ef9887797b98679f290c480, with-user-abort-20240503-a3db02e/with-user-abort.asd

@@ -23,7 +23,7 @@
            #:session #:make-session #:session-p
            #:session-width #:session-height #:session-cursor #:session-events
            #:session-damage #:session-edges-x #:session-edges-y
-           #:session-duration #:*zoom-fit-margin* #:*track-snap*
+           #:session-duration #:*zoom-fit-margin*
            #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
            #:*cursor-omega-slow* #:*cursor-omega-fast* #:*cursor-speed-ref*
            #:*cursor-anticipate* #:spring-step #:ease-cursor
@@ -34,9 +34,7 @@
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
-           #:*track* #:*track-omega-pan* #:*track-omega-zoom* #:*track-anticipate*
-           #:*track-text-follow* #:*track-linger* #:*track-zoom-out-omega*
-           #:plan-tracked-timeline
+           #:*track*
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -58,6 +56,7 @@
   (cursor '())   ; list of cursor-sample, ascending time
   (events '())   ; list of input-event, ascending time
   (damage '())   ; list of (time x0 y0 x1 y1), changed-region UV bbox per frame
+  (clicks '())   ; list of click times (s); positioned via the cursor track
   (edges-x '())  ; sorted UV x of strong vertical content edges (panel boundaries)
   (edges-y '())) ; sorted UV y of strong horizontal content edges
 
@@ -429,102 +428,345 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
 (defparameter *track* t
   "When true, plan-timeline uses the continuous tracked camera (smooth pan/zoom
 following the changing region) instead of static per-group punch-ins.")
-(defparameter *track-omega-pan* 6.0
-  "Camera pan-spring stiffness (rad/s). Lower = slower, more cinematic glide.")
-(defparameter *track-omega-zoom* 4.0
-  "Camera zoom-spring stiffness (rad/s).")
-(defparameter *track-anticipate* 0.35
-  "Seconds of look-ahead: target where activity is heading so the frame leads it.")
-(defparameter *track-window* 0.5
-  "Half-width (s) of the activity window sampled around each moment.")
-(defparameter *track-center-deadband* 0.012
-  "UV deadband: target centre moves under this are ignored (anti-jitter).")
-(defparameter *track-linger* 1.6
-  "Seconds to HOLD a zoom after activity stops before easing back to wide. Keeps
-the camera from pumping in/out through brief pauses (e.g. between keystrokes).")
-(defparameter *track-zoom-out-omega* 2.0
-  "Zoom-OUT spring stiffness (rad/s) -- lower than zoom-in so easing out is gentle
-and unhurried, not a snap back to wide.")
-(defparameter *track-text-follow* 2.0
-  "Recency bias when centring on damage: newer changes get up to (1+this)x weight,
-so the camera follows the leading edge of new content (the caret when typing).
-0 = plain centroid.")
+(defparameter *track-min-activity* 0.0016
+  "Twitch gate: total changed UV area within an activity window must reach this
+before the camera treats it as a real shot to punch into. Rejects a lone blinking
+cursor / clock tick / notification dot (a single grid cell is ~0.0004) so the
+frame doesn't chase a corner twitch when nothing else is happening. 0 = off.")
 
-(defun %window-activity (session t0 t1 &key (max-rect *damage-max-rect*))
-  "Localized activity in [T0,T1]: return (values cx cy spread present-p) where
-CX,CY is the centre (damage centroid, grown to include the cursor) and SPREAD is
-the max UV extent of the activity bbox. PRESENT-P is NIL when nothing localized
-is happening (idle -> the camera should ease back to wide)."
-  (let ((w (session-width session)) (h (session-height session))
-        (sx 0.0) (sy 0.0) (sw 0.0) (n 0)          ; sw = sum of recency weights
-        (span (max 1e-3 (- t1 t0)))
-        (x0 nil) (y0 nil) (x1 nil) (y1 nil))
-    (flet ((acc (ax ay) (setf x0 (if x0 (min x0 ax) ax) y0 (if y0 (min y0 ay) ay)
-                              x1 (if x1 (max x1 ax) ax) y1 (if y1 (max y1 ay) ay))))
-      (dolist (d (session-damage session))
-        (destructuring-bind (dt dx0 dy0 dx1 dy1) d
-          (when (and (<= t0 dt t1) (<= (- dx1 dx0) max-rect) (<= (- dy1 dy0) max-rect))
-            ;; recency weight: newer damage counts more (text-follow / leading edge)
-            (let ((wt (+ 1.0 (* *track-text-follow* (/ (- dt t0) span)))))
-              (incf sx (* wt 0.5 (+ dx0 dx1))) (incf sy (* wt 0.5 (+ dy0 dy1)))
-              (incf sw wt))
-            (incf n)
-            (acc dx0 dy0) (acc dx1 dy1))))
-      (if (plusp n)
-          (let ((ccx (/ sx sw)) (ccy (/ sy sw)))
-            ;; keep the pointer in frame: grow the bbox toward the cursor a little
-            (multiple-value-bind (curx cury) (cursor-at session (* 0.5 (+ t0 t1)))
-              (when curx (acc (/ curx w) (/ cury h))))
-            (values ccx ccy (max (- x1 x0) (- y1 y0)) t))
-          ;; no localized change -> not "present"; report the cursor for continuity
-          (multiple-value-bind (curx cury) (cursor-at session (* 0.5 (+ t0 t1)))
-            (if curx (values (/ curx w) (/ cury h) 0.0 nil)
-                (values 0.5 0.5 0.0 nil)))))))
+;;; ==================================================================
+;;; Evidence layer (Phase 1). Turns raw signals into a RANKED list of
+;;; attention candidates over a short time window, per the movement
+;;; guidelines: clicks are strongest, sustained localized damage is
+;;; medium, the cursor is weak. Damage is aggregated into regions and
+;;; accumulated over the window; isolated/global damage is discounted.
+;;; The shot planner (Phase 2) consumes these candidates -- it never
+;;; touches raw damage directly.
+;;; ==================================================================
 
-(defparameter *track-snap* nil
-  "When true (and content edges are known), gently align the tracked frame to the
-enclosing window/UI-panel boundaries.")
-(defparameter *track-snap-tol* 0.05
-  "Max UV nudge allowed when snapping a frame edge to a content edge.")
+(defparameter *evi-window* 1.0
+  "Accumulation window (s): evidence is summed over this span so several updates
+resolve into one coherent target instead of reacting per damage frame.")
+(defparameter *evi-min-evidence* 1.6
+  "A region must accumulate at least this much recency-weighted evidence (roughly
+this many recent damage frames) to count -- so SUSTAINED localized activity (e.g.
+a typing caret, tiny but repeated) qualifies while a lone one-frame blink/twitch
+does not. This is the twitch gate, on accumulation rather than area.")
+(defparameter *evi-cluster* 0.14
+  "UV radius (sum-of-axes) within which damage rects merge into one region.")
+(defparameter *evi-click-lead* 0.45
+  "Seconds BEFORE a click that its evidence begins -- lets the planner start moving
+early so the destination is framed when the click lands (anticipation).")
+(defparameter *evi-click-hold* 1.1
+  "Seconds AFTER a click that its (strong) evidence persists.")
+(defparameter *evi-cursor-weight* 0.12
+  "Strength of the bare-cursor candidate: weak supporting evidence only, never on
+its own a reason to move.")
+(defparameter *evi-global-dim* 0.72
+  "A region wider than this (UV, max axis) is treated as a global repaint/scroll
+and its strength is halved -- prefer sustained localized activity over a big wash.")
 
-(defun %nearest (x xs)
-  "Nearest value in list XS to X, or NIL if XS is empty."
-  (when xs (let ((best (first xs)))
-             (dolist (v (rest xs) best) (when (< (abs (- v x)) (abs (- best x))) (setf best v))))))
+(defstruct (cand (:constructor make-cand (cx cy x0 y0 x1 y1 strength kind)))
+  cx cy x0 y0 x1 y1 strength kind)   ; kind: :click :damage :cursor
 
-(defun %snap-1d (c hw edges tol)
-  "Nudge centre C (window half-width HW) so the window's nearer edge aligns to the
-closest content EDGE within TOL. The nudge is small, so the spring absorbs it."
-  (if (null edges) c
-      (let* ((el (%nearest (- c hw) edges)) (er (%nearest (+ c hw) edges))
-             (dl (if el (- el (- c hw)) 1e9)) (dr (if er (- er (+ c hw)) 1e9)))
-        (cond ((and (< (abs dl) tol) (<= (abs dl) (abs dr))) (+ c dl))
-              ((< (abs dr) tol) (+ c dr))
-              (t c)))))
+(defun %located-clicks (session)
+  "Each captured click time positioned by the cursor track: list of (t cx cy) UV."
+  (let ((w (session-width session)) (h (session-height session)))
+    (loop for tc in (session-clicks session)
+          collect (multiple-value-bind (x y) (cursor-at session tc)
+                    (list (float tc 1.0) (/ x w) (/ y h))))))
 
-(defun plan-tracked-timeline (session
-                              &key (zoom *zoom-level*) (zoom-min *zoom-min*)
-                                   (omega-pan *track-omega-pan*)
-                                   (omega-zoom *track-omega-zoom*)
-                                   (anticipate *track-anticipate*)
-                                   (window *track-window*)
-                                   (linger *track-linger*)
-                                   (snap *track-snap*)
-                                   (padding 0.04) (corner 0.09)
-                                   (shadow-blur 0.03) (shadow-alpha 0.5)
-                                   (bg '(0.11 0.12 0.15)))
-  "Continuous tracked-camera timeline: a spring-damped centre + zoom that follow
-the changing region over SESSION's duration. Covers pan tracking, adaptive
-'breathing' zoom, and anticipatory lead-in. Returns a dense keyframe timeline."
+(defun %damage-regions (session t0 t1 &key (max-rect *damage-max-rect*))
+  "Cluster localized damage in [T0,T1] into regions (greedy, by centre proximity),
+accumulating recency-weighted evidence. Return a list of :damage CANDs, strongest
+first. Isolated twitches (below *track-min-activity* total) and per-rect global
+rects are excluded; a region grown globally wide is down-weighted."
+  (let ((span (max 1e-3 (- t1 t0)))
+        (regs '()))                     ; each: (cx cy x0 y0 x1 y1 wsum area)
+    (dolist (d (session-damage session))
+      (destructuring-bind (dt dx0 dy0 dx1 dy1) d
+        (when (and (<= t0 dt t1) (<= (- dx1 dx0) max-rect) (<= (- dy1 dy0) max-rect))
+          (let* ((mcx (* 0.5 (+ dx0 dx1))) (mcy (* 0.5 (+ dy0 dy1)))
+                 (wt (+ 0.5 (/ (- dt t0) span)))            ; recency weight
+                 (ar (* (- dx1 dx0) (- dy1 dy0)))
+                 (hit (find-if (lambda (r)
+                                 (<= (+ (abs (- mcx (first r))) (abs (- mcy (second r))))
+                                     *evi-cluster*))
+                               regs)))
+            (if hit
+                (setf (nth 2 hit) (min (nth 2 hit) dx0) (nth 3 hit) (min (nth 3 hit) dy0)
+                      (nth 4 hit) (max (nth 4 hit) dx1) (nth 5 hit) (max (nth 5 hit) dy1)
+                      (nth 6 hit) (+ (nth 6 hit) wt) (nth 7 hit) (+ (nth 7 hit) ar)
+                      ;; weighted-drift the centre toward the new rect
+                      (first hit) (+ (* 0.85 (first hit)) (* 0.15 mcx))
+                      (second hit) (+ (* 0.85 (second hit)) (* 0.15 mcy)))
+                (push (list mcx mcy dx0 dy0 dx1 dy1 wt ar) regs))))))
+    (loop for (cx cy x0 y0 x1 y1 wsum area) in regs
+          for maxdim = (max (- x1 x0) (- y1 y0))
+          for str0 = (- 1.0 (exp (- (/ wsum 4.0))))   ; saturating in [0,1)
+          for str = (if (> maxdim *evi-global-dim*) (* 0.5 str0) str0)
+          ;; sustained accumulation (not one-off area) is the twitch gate
+          when (>= wsum *evi-min-evidence*)
+            collect (make-cand cx cy x0 y0 x1 y1 str :damage) into out
+          finally (return (sort out #'> :key #'cand-strength)))))
+
+(defun evidence-at (session t0 t1 &optional located-clicks)
+  "Ranked attention candidates for the window [T0,T1], strongest first. LOCATED-
+CLICKS is the precomputed (%located-clicks) list (pass it to avoid recomputing per
+call). Clicks outrank damage; a bare cursor is a weak last resort."
+  (let* ((now t1)
+         (clicks (or located-clicks (%located-clicks session)))
+         (out (%damage-regions session t0 t1)))
+    ;; clicks: strong, active from LEAD before to HOLD after the click, tested at
+    ;; NOW (the window end) so the planner SEES the click coming *lead* early and
+    ;; can start moving before it lands (anticipation, guideline 4).
+    (dolist (c clicks)
+      (destructuring-bind (tc ccx ccy) c
+        (when (<= (- tc *evi-click-lead*) now (+ tc *evi-click-hold*))
+          ;; boost a co-located damage region, else add a click candidate
+          (let ((near (find-if (lambda (r)
+                                  (<= (+ (abs (- ccx (cand-cx r))) (abs (- ccy (cand-cy r))))
+                                      *evi-cluster*))
+                                out)))
+            (if near
+                (setf (cand-strength near) (+ 1.0 (cand-strength near))
+                      (cand-kind near) :click)
+                (push (make-cand ccx ccy (- ccx 0.06) (- ccy 0.06)
+                                 (+ ccx 0.06) (+ ccy 0.06) 1.0 :click)
+                      out))))))
+    ;; weak cursor fallback so there is always *a* candidate
+    (multiple-value-bind (x y) (cursor-at session now)
+      (let ((cx (/ x (session-width session))) (cy (/ y (session-height session))))
+        (push (make-cand cx cy (- cx 0.04) (- cy 0.04) (+ cx 0.04) (+ cy 0.04)
+                         *evi-cursor-weight* :cursor)
+              out)))
+    (stable-sort out #'> :key #'cand-strength)))
+
+;;; ==================================================================
+;;; Shot planner (Phase 2). Consumes ranked evidence into a SPARSE list
+;;; of shots {kind, centre, zoom} from a small vocabulary, with the
+;;; editorial discipline of the guidelines: establish first, hold, a
+;;; cooldown + asymmetric hysteresis so we don't oscillate, frame two
+;;; co-active regions together, and widen only on a real idle beat.
+;;; ==================================================================
+
+(defparameter *shot-overview* 1.0 "Overview shot size: whole frame; context / between tasks.")
+(defparameter *shot-working* 1.4 "Working shot size: the normal focused view.")
+(defparameter *shot-detail* 1.9 "Detail shot size: small controls / brief precision work.")
+(defparameter *shot-min-hold* 2.0
+  "Minimum seconds to hold a shot before any new move (cooldown). Gives the viewer
+time to orient and read; enforces one move per beat, not per input event.")
+(defparameter *shot-hysteresis* 1.5
+  "To LEAVE the current shot a rival target's evidence must exceed the evidence
+still holding the current frame by this factor. Asymmetry prevents oscillation.")
+(defparameter *shot-idle-widen* 1.5
+  "Seconds with no worthwhile evidence before widening to Overview (a new beat).")
+(defparameter *shot-worth* 0.25
+  "Minimum candidate strength worth leaving Overview / taking a close view for.")
+(defparameter *shot-both-radius* 0.45
+  "Two strong candidates within this (UV, sum-of-axes) are framed TOGETHER in one
+shot rather than alternated between.")
+(defparameter *shot-establish* 1.0
+  "Hold the opening Overview at least this long before the first close view.")
+(defparameter *shot-move-eps* 0.12
+  "Centre must shift more than this (UV, sum-of-axes) to count as a real reframe.")
+(defparameter *shot-commit-dwell* 0.7
+  "A new target must remain the dominant one for this long before the camera moves
+to it. A brief flash -- a <1s repaint, popup, or result panel elsewhere -- never
+persists long enough to earn a cut, so the camera stays on the task instead of
+darting after transients (G2/G3/G9: one move per task step, not per event).")
+
+(defstruct (shot (:constructor make-shot (t0 t1 kind cx cy zoom)))
+  t0 t1 kind cx cy zoom)
+
+;;; Motion timing (Phase 3). Transitions are single composed gestures with
+;;; ease-in/out; duration scales with distance (a bit, not proportionally).
+(defparameter *move-dur-small* 0.45  "Small reframe duration (s) (G7 350-550ms).")
+(defparameter *move-dur-normal* 0.70 "Normal pan/zoom duration (s) (G7 550-850ms).")
+(defparameter *move-dur-large* 0.95  "Large transition duration (s) (G7 800-1100ms).")
+(defparameter *move-small-mag* 0.15  "Centre shift (UV sum) below which a move is small.")
+(defparameter *move-large-mag* 0.50  "Centre shift (UV sum) above which a move is large.")
+(defparameter *move-far* 0.50
+  "Centre shift (UV sum) beyond which a tight->tight move routes THROUGH Overview
+(widen-then-push-in) instead of a diagonal pan across the screen (G7/G11).")
+
+(defun %smoother (u)
+  "Smootherstep ease-in/out on [0,1]: zero velocity AND acceleration at both ends,
+so a move starts and stops gently (no mechanical constant-speed slide)."
+  (let ((x (max 0.0 (min 1.0 u)))) (* x x x (+ (* x (- (* x 6.0) 15.0)) 10.0))))
+
+(defun %move-dur (a b)
+  "Transition duration between shots A and B, bucketed by centre distance."
+  (let ((mag (+ (abs (- (shot-cx a) (shot-cx b))) (abs (- (shot-cy a) (shot-cy b))))))
+    (cond ((< mag *move-small-mag*) *move-dur-small*)
+          ((< mag *move-large-mag*) *move-dur-normal*)
+          (t *move-dur-large*))))
+
+(defun %far-through-overview-p (a b)
+  "T when the move is a long tight->tight jump that should route through Overview."
+  (and (> (shot-zoom a) 1.05) (> (shot-zoom b) 1.05)
+       (> (+ (abs (- (shot-cx a) (shot-cx b))) (abs (- (shot-cy a) (shot-cy b))))
+          *move-far*)))
+
+(defun %xition (a b u)
+  "Eased camera framing a fraction U in [0,1] through the A->B transition. Returns
+(values zoom cx cy). A far tight->tight jump dips fully to Overview at the midpoint
+(widen-then-push-in); otherwise zoom eases straight across with the pan."
+  (let* ((e (%smoother u))
+         (cx (+ (shot-cx a) (* (- (shot-cx b) (shot-cx a)) e)))
+         (cy (+ (shot-cy a) (* (- (shot-cy b) (shot-cy a)) e)))
+         (z (if (%far-through-overview-p a b)
+                (if (< u 0.5)
+                    (+ (shot-zoom a) (* (- *shot-overview* (shot-zoom a)) (%smoother (* 2.0 u))))
+                    (+ *shot-overview* (* (- (shot-zoom b) *shot-overview*)
+                                          (%smoother (- (* 2.0 u) 1.0)))))
+                (+ (shot-zoom a) (* (- (shot-zoom b) (shot-zoom a)) e)))))
+    (values z cx cy)))
+
+(defun %bucket-zoom (x0 y0 x1 y1 &optional allow-detail)
+  "Pick a vocabulary shot size for an activity box. Returns (values zoom kind),
+capped so the box is never cropped (leaves *zoom-fit-margin* around it). DETAIL is
+only chosen when ALLOW-DETAIL -- reserved for click-driven precision on a small
+control; damage-driven activity (typing/editing) tops out at WORKING so the field
+and surrounding context stay visible (G5/G8)."
+  (let* ((maxdim (max (- x1 x0) (- y1 y0)))
+         (raw (if (<= maxdim 0.0) *shot-detail*
+                  (/ 1.0 (* maxdim (+ 1.0 *zoom-fit-margin*))))))
+    (cond ((and allow-detail (>= raw *shot-detail*)) (values *shot-detail* :detail))
+          ((>= raw *shot-working*) (values *shot-working* :working))
+          ((>= raw 1.2)            (values (min *shot-working* raw) :working))
+          (t                       (values *shot-overview* :overview)))))
+
+(defparameter *scroll-min-rects* 4
+  "This many wide (full-width) damage rects within a window reads as SCROLLING; the
+camera then holds the viewport steady rather than reacting (the content is already
+moving -- adding a camera pan would double the motion, G8/G11).")
+
+(defun %activity-ahead-p (session t0 t1 clicks)
+  "T when strong evidence (a worthwhile damage region, or a click) occurs in the
+future window [T0,T1] -- used so the camera doesn't widen during a gap that is
+about to be filled (no widen-then-repunch)."
+  (or (some (lambda (r) (>= (cand-strength r) *shot-worth*))
+            (%damage-regions session t0 t1))
+      (some (lambda (lc) (<= t0 (first lc) t1)) clicks)))
+
+(defun %scrolling-p (session t0 t1)
+  "T when [T0,T1] is dominated by wide, full-width damage -- the signature of
+scrolling / a large repaint. Such damage never forms a target (it exceeds
+*damage-max-rect*); this just lets the planner HOLD instead of widening."
+  (>= (count-if (lambda (d)
+                  (destructuring-bind (dt x0 y0 x1 y1) d
+                    (declare (ignore y0 y1))
+                    (and (<= t0 dt t1) (> (- x1 x0) *damage-max-rect*))))
+                (session-damage session))
+      *scroll-min-rects*))
+
+(defun plan-shots (session &key (window *evi-window*))
+  "Walk the recording and emit a sparse list of SHOTs. Evidence-driven, with
+establish-first, cooldown, hysteresis, frame-both, and idle-widen."
   (let* ((dur (session-duration session))
-         (dt (/ 1.0 60.0))                ; spring integration step
-         (emit-every 3)                   ; keyframe density (~20/s)
-         ;; camera state: centre (cx,cy) + velocities, zoom (z) + velocity.
-         (cx 0.5) (cy 0.5) (vx 0.0) (vy 0.0)
-         (z 1.0) (vz 0.0)
-         (tcx 0.5) (tcy 0.5)              ; last committed target centre (deadband)
-         ;; linger state: the zoomed shot to hold through brief pauses.
-         (last-active -1.0e9) (held-z 1.0) (held-cx 0.5) (held-cy 0.5)
+         (dt (/ 1.0 30.0))
+         (clicks (%located-clicks session))
+         (shots '())
+         (cur-kind :overview) (cur-cx 0.5) (cur-cy 0.5) (cur-z 1.0)
+         (cur-start 0.0) (last-move 0.0) (last-strong -1.0e9)
+         (pend-cx -9.0) (pend-cy -9.0) (pend-since 0.0))  ; target-dwell tracking
+    (labels ((emit (endt)
+               (push (make-shot cur-start (max cur-start endt) cur-kind cur-cx cur-cy cur-z)
+                     shots))
+             (switch (tm kind cx cy z)
+               ;; Edge-guard (G8): clamp the centre so the frame stays inside the
+               ;; content -- no black bars, and the focused area never sits under a
+               ;; crop edge.
+               (let* ((half (min 0.5 (/ 0.5 (max 1.0 z))))
+                      (ccx (min (- 1.0 half) (max half cx)))
+                      (ccy (min (- 1.0 half) (max half cy))))
+                 (emit tm)
+                 (setf cur-kind kind cur-cx ccx cur-cy ccy cur-z z
+                       cur-start tm last-move tm))))
+      (loop for tm from 0.0 to dur by dt do
+        (let* ((ev (evidence-at session (max 0.0 (- tm window)) tm clicks))
+               (strong (remove-if (lambda (c) (< (cand-strength c) *shot-worth*)) ev))
+               (primary (first strong))
+               ;; retention: strongest evidence still near the CURRENT centre
+               (ret (loop for c in ev
+                          when (<= (+ (abs (- (cand-cx c) cur-cx))
+                                      (abs (- (cand-cy c) cur-cy)))
+                                   0.2)
+                            maximize (cand-strength c))))
+          (when strong (setf last-strong tm))
+          ;; target-dwell: reset the pending target whenever the dominant candidate
+          ;; jumps to a new place; a target must persist *shot-commit-dwell* before
+          ;; we move to it, so brief flashes never earn a cut.
+          (when primary
+            (unless (<= (+ (abs (- (cand-cx primary) pend-cx))
+                           (abs (- (cand-cy primary) pend-cy)))
+                        *shot-move-eps*)
+              (setf pend-cx (cand-cx primary) pend-cy (cand-cy primary) pend-since tm)))
+          (let ((held (>= (- tm last-move) *shot-min-hold*))    ; cooldown elapsed?
+                (dwelled (>= (- tm pend-since) *shot-commit-dwell*)))  ; target settled?
+            (cond
+              ;; scrolling: hold the viewport steady, do not react (G8/G11).
+              ((%scrolling-p session (max 0.0 (- tm window)) tm) nil)
+              ;; idle beat: widen to Overview only once we've held the current shot,
+              ;; activity has been gone a while, AND nothing resumes soon (no snap).
+              ((and held (null strong) (not (eq cur-kind :overview))
+                    (>= (- tm last-strong) *shot-idle-widen*)
+                    (not (%activity-ahead-p session tm (+ tm *shot-min-hold*) clicks)))
+               (switch tm :overview 0.5 0.5 *shot-overview*))
+              ;; a target worth a close view
+              (primary
+               ;; frame-both: fold in a 2nd strong candidate that's nearby
+               (let* ((second (find-if (lambda (c)
+                                         (and (not (eq c primary))
+                                              (>= (cand-strength c) *shot-worth*)
+                                              (<= (+ (abs (- (cand-cx c) (cand-cx primary)))
+                                                     (abs (- (cand-cy c) (cand-cy primary))))
+                                                  *shot-both-radius*)))
+                                       ev))
+                      (allow-detail (eq (cand-kind primary) :click))
+                      (x0 (cand-x0 primary)) (y0 (cand-y0 primary))
+                      (x1 (cand-x1 primary)) (y1 (cand-y1 primary)))
+                 (when second
+                   (setf x0 (min x0 (cand-x0 second)) y0 (min y0 (cand-y0 second))
+                         x1 (max x1 (cand-x1 second)) y1 (max y1 (cand-y1 second))))
+                 (multiple-value-bind (z kind) (%bucket-zoom x0 y0 x1 y1 allow-detail)
+                   ;; clamp the target to the edge-guard BEFORE deciding it moved,
+                   ;; so activity that clamps to the same frame isn't re-cut forever.
+                   (let* ((half (min 0.5 (/ 0.5 (max 1.0 z))))
+                          (ncx (min (- 1.0 half) (max half (* 0.5 (+ x0 x1)))))
+                          (ncy (min (- 1.0 half) (max half (* 0.5 (+ y0 y1))))))
+                     (cond
+                       ;; establish-first: from Overview, push in once we've held
+                       ;; the establishing shot long enough and the target settled.
+                       ((eq cur-kind :overview)
+                        (when (and held dwelled (>= tm *shot-establish*))
+                          (switch tm kind ncx ncy z)))
+                       ;; already close: move only past the cooldown and when the new
+                       ;; target clearly beats what's holding the current frame
+                       (t
+                        (let ((moved (> (+ (abs (- ncx cur-cx)) (abs (- ncy cur-cy)))
+                                        *shot-move-eps*))
+                              (resized (not (eq kind cur-kind))))
+                          (when (and held dwelled (or moved resized)
+                                     (>= (cand-strength primary)
+                                         (* *shot-hysteresis* (max ret 0.15))))
+                            (switch tm kind ncx ncy z)))))))))))))
+      (emit dur)
+      (nreverse shots))))
+
+(defun shots->keyframes (session shots
+                         &key (padding 0.04) (corner 0.09)
+                              (shadow-blur 0.03) (shadow-alpha 0.5)
+                              (bg '(0.11 0.12 0.15)))
+  "Motion layer (Phase 3): render the SHOT list into keyframes as composed,
+duration-controlled ease-in/out transitions. Each transition occupies the TAIL of
+the outgoing shot and ARRIVES at the next shot's start time (so a click-driven
+destination is framed as the action lands); otherwise the shot is held perfectly
+still. Long tight->tight jumps route through Overview (widen-then-push-in)."
+  (let* ((dur (session-duration session))
+         (dt (/ 1.0 60.0)) (emit-every 3)
+         (sv (coerce shots 'vector)) (nsh (length sv))
          (kfs '()) (i 0))
     (flet ((frame (time zoom ccx ccy)
              (kf:make-keyframe :time (max 0.0 (min dur (float time 1.0)))
@@ -532,54 +774,39 @@ the changing region over SESSION's duration. Covers pan tracking, adaptive
                                :center-x (float ccx 1.0) :center-y (float ccy 1.0)
                                :padding padding :corner-radius corner
                                :shadow-blur shadow-blur :shadow-alpha shadow-alpha
-                               :bg-color bg)))
-      (loop for tm = 0.0 then (+ tm (float dt 1.0))
-            while (<= tm (+ dur (float dt 1.0)))
-            do (multiple-value-bind (ax ay spread present)
-                   ;; asymmetric window: look a little back, further forward
-                   ;; (anticipation) so the camera leads the action.
-                   (%window-activity session (max 0.0 (- tm window))
-                                     (min dur (+ tm anticipate window)))
-                 (let* ((zfit (if present
-                                  (%fit-zoom spread spread zoom *zoom-fit-margin*)
-                                  1.0))
-                        (activez (cond ((and zoom-min (> zoom-min zfit)) zoom-min)
-                                       (t zfit))))
-                   ;; While activity is present and worth zooming, remember the
-                   ;; shot (zoom + centre) so we can HOLD it through brief pauses.
-                   (when (and present (> activez 1.02))
-                     (setf last-active tm held-z activez held-cx ax held-cy ay))
-                   (let* ((lingering (< (- tm last-active) linger))
-                          ;; zoom: active now, else hold while lingering, else wide.
-                          (tz (cond (present activez)
-                                    (lingering held-z)
-                                    (t 1.0)))
-                          ;; centre: track live activity, else the held shot (so
-                          ;; easing out doesn't also pan the frame around).
-                          (targ-cx (if present ax held-cx))
-                          (targ-cy (if present ay held-cy)))
-                     ;; commit target centre (deadband against micro-jitter)
-                     (when (> (+ (abs (- targ-cx tcx)) (abs (- targ-cy tcy)))
-                              *track-center-deadband*)
-                       (setf tcx targ-cx tcy targ-cy))
-                     ;; Content-aware framing: nudge the target to window/panel
-                     ;; edges (pre-spring, so it stays smooth).
-                     (when (and snap (> tz 1.02))
-                       (let ((hw (/ 0.5 tz)))
-                         (setf tcx (%snap-1d tcx hw (session-edges-x session) *track-snap-tol*)
-                               tcy (%snap-1d tcy hw (session-edges-y session) *track-snap-tol*))))
-                     ;; advance the springs; ease OUT more slowly than in.
-                     (multiple-value-setq (cx vx) (spring-step cx vx tcx omega-pan dt))
-                     (multiple-value-setq (cy vy) (spring-step cy vy tcy omega-pan dt))
-                     (multiple-value-setq (z  vz)
-                       (spring-step z vz tz (if (< tz z) *track-zoom-out-omega* omega-zoom) dt)))
-                   (when (zerop (mod i emit-every))
-                     (push (frame tm (max 1.0 z) cx cy) kfs))
-                   (incf i))))
-      ;; clean open/close; %clean-timeline sorts by time and dedups collisions
+                               :bg-color bg))
+           (idx-at (tm)
+             (let ((k 0))
+               (dotimes (j nsh k)
+                 (when (<= (shot-t0 (aref sv j)) tm) (setf k j))))))
+      (when (plusp nsh)
+        (loop for tm = 0.0 then (+ tm (float dt 1.0))
+              while (<= tm (+ dur (float dt 1.0)))
+              do (let* ((ci (idx-at tm))
+                        (a (aref sv ci))
+                        (b (when (< ci (1- nsh)) (aref sv (1+ ci))))
+                        ;; transition occupies [t0_b - d, t0_b], arriving at t0_b;
+                        ;; clamp d so it fits inside the outgoing shot's hold.
+                        (d (when b (min (%move-dur a b)
+                                        (max 0.1 (- (shot-t0 b) (shot-t0 a))))))
+                        (in-x (and b (>= tm (- (shot-t0 b) d)))))
+                   (multiple-value-bind (z cx cy)
+                       (if in-x
+                           (%xition a b (/ (- tm (- (shot-t0 b) d)) d))
+                           (values (shot-zoom a) (shot-cx a) (shot-cy a)))
+                     (when (zerop (mod i emit-every))
+                       (push (frame tm (max 1.0 z) cx cy) kfs))
+                     (incf i)))))
       (push (frame 0.0 1.0 0.5 0.5) kfs)
-      (push (frame dur (max 1.0 z) cx cy) kfs)
       (%clean-timeline kfs))))
+
+(defun plan-editor-timeline (session &key (padding 0.04) (corner 0.09)
+                                          (shadow-blur 0.03) (shadow-alpha 0.5)
+                                          (bg '(0.11 0.12 0.15)))
+  "Editor model (Phase 2): evidence -> sparse shot list -> keyframes."
+  (shots->keyframes session (plan-shots session)
+                    :padding padding :corner corner
+                    :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg))
 
 (defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
                                    (zoom *zoom-level*) (zoom-min *zoom-min*)
@@ -589,23 +816,22 @@ the changing region over SESSION's duration. Covers pan tracking, adaptive
                                    (shadow-blur 0.03) (shadow-alpha 0.5)
                                    (bg '(0.11 0.12 0.15)))
   "Full Director pass: SESSION -> zoom keyframe timeline directly renderable by
-the compositor. When TRACK, a continuous spring-damped camera follows the
-changing region (smooth pan/zoom). Otherwise static per-group punch-ins, where
-ACTIVITY selects the source: :events (clicks/keys), :dwell, or :auto."
+the compositor. When TRACK, the editorial shot planner directs the camera
+(evidence -> shots -> composed motion). Otherwise static per-group punch-ins,
+where ACTIVITY selects the source: :events (clicks/keys), :dwell, or :auto."
   (if track
-      (plan-tracked-timeline session :zoom zoom :zoom-min zoom-min
-                             :padding padding :corner corner
-                             :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)
-  (schedule-zooms session
-                  (ecase activity
-                    (:events (detect-activity session :gap gap))
-                    (:dwell  (detect-dwell-activity session))
-                    (:auto   (if (session-events session)
-                                 (detect-activity session :gap gap)
-                                 (detect-dwell-activity session))))
-                  :zoom zoom :zoom-min zoom-min :lead lead :tail tail
-                  :padding padding :corner corner
-                  :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)))
+      (plan-editor-timeline session :padding padding :corner corner
+                            :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)
+      (schedule-zooms session
+                      (ecase activity
+                        (:events (detect-activity session :gap gap))
+                        (:dwell  (detect-dwell-activity session))
+                        (:auto   (if (session-events session)
+                                     (detect-activity session :gap gap)
+                                     (detect-dwell-activity session))))
+                      :zoom zoom :zoom-min zoom-min :lead lead :tail tail
+                      :padding padding :corner corner
+                      :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)))
 
 ;;; ------------------------------------------------------------------
 ;;; Synthetic fixtures. A deterministic session (no RNG, so tests are stable):

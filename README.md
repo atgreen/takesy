@@ -110,7 +110,7 @@ as often as you like — no re-recording:
 ```sh
 takesy capture --dir /tmp/talk       # capture only -> self-contained recording dir
 takesy render /tmp/talk --output a.mp4 --bg dark
-takesy render /tmp/talk --output b.mp4 --bg navy --zoom 2.4   # same capture, new look
+takesy render /tmp/talk --output b.mp4 --bg navy --aspect 9:16   # same capture, new look
 ```
 
 `capture` writes the frames plus a manifest into the dir; `render` runs the
@@ -135,17 +135,21 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--cursor-size F` | cursor height as a fraction of the output height | `0.06` |
 | `--audio MODE` | record audio: `system` (desktop/monitor), `mic`, or `both` (mixed). Muxed into the mp4 as AAC; set at `capture`/`record` time | off |
 
-### Direction tuning
+### The camera
 
-Dial the auto-zoom and cursor feel to taste:
+takesy directs the camera like an editor rather than following the cursor: it
+ranks evidence (clicks > sustained activity > cursor), picks shots from a small
+vocabulary (overview / working / detail), holds each shot, and moves in single
+composed, eased gestures — establishing wide first, widening through the overview
+on large jumps, and never darting after a brief flash. There are no per-move
+knobs to dial; the direction is automatic. `--log-camera PATH` writes the
+per-frame camera path (zoom/pan) to CSV and prints a motion summary if you want
+to inspect it.
+
+Cursor-overlay feel is still tunable:
 
 | Option | Meaning | Default |
 | --- | --- | --- |
-| `--zoom F` | punch-in zoom factor for activity | `1.8` |
-| `--zoom-min F` | floor zoom for activity too spread out to auto-fit (e.g. full-screen apps); centers on the cursor; `≤1` disables | `1.6` |
-| `--track on/off` | smooth camera that pans/zooms to follow the changing region (off = static per-activity punch-ins) | `on` |
-| `--snap on` | align the tracked frame to detected window/UI-panel edges | off |
-| `--zoom-merge-gap S` | idle gap (s) below which the zoom pans between spots instead of zooming out and back in | `2.5` |
 | `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher is snappier with less lag | `30.0` |
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.4` |
 
