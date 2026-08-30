@@ -526,6 +526,12 @@ recording plist."
                                   (zoom-min dir:*zoom-min*)
                                   (track dir:*track*)
                                   (snap dir:*track-snap*)
+                                  (linger dir:*track-linger*)
+                                  (pan-speed dir:*track-omega-pan*)
+                                  (zoom-speed dir:*track-omega-zoom*)
+                                  (zoom-out-speed dir:*track-zoom-out-omega*)
+                                  (track-anticipate dir:*track-anticipate*)
+                                  (text-follow dir:*track-text-follow*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
@@ -545,6 +551,12 @@ different config. Return (values out n-frames)."
         (dir:*zoom-min*          zoom-min)
         (dir:*track*             track)
         (dir:*track-snap*        snap)
+        (dir:*track-linger*      linger)
+        (dir:*track-omega-pan*   pan-speed)
+        (dir:*track-omega-zoom*  zoom-speed)
+        (dir:*track-zoom-out-omega* zoom-out-speed)
+        (dir:*track-anticipate*  track-anticipate)
+        (dir:*track-text-follow* text-follow)
         (dir:*zoom-merge-gap*    zoom-merge-gap)
         (dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
@@ -636,6 +648,12 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (zoom-min dir:*zoom-min*)
                            (track dir:*track*)
                            (snap dir:*track-snap*)
+                           (linger dir:*track-linger*)
+                           (pan-speed dir:*track-omega-pan*)
+                           (zoom-speed dir:*track-omega-zoom*)
+                           (zoom-out-speed dir:*track-zoom-out-omega*)
+                           (track-anticipate dir:*track-anticipate*)
+                           (text-follow dir:*track-text-follow*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
                            (cursor-anticipate dir:*cursor-anticipate*)
@@ -654,6 +672,9 @@ re-rendered. Return (values out n-frames)."
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
                           :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
                           :zoom zoom :zoom-min zoom-min :track track :snap snap :zoom-merge-gap zoom-merge-gap
+                          :linger linger :pan-speed pan-speed :zoom-speed zoom-speed
+                          :zoom-out-speed zoom-out-speed :track-anticipate track-anticipate
+                          :text-follow text-follow
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
                           :out out)))

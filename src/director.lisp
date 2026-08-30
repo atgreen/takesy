@@ -35,7 +35,7 @@
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
            #:*track* #:*track-omega-pan* #:*track-omega-zoom* #:*track-anticipate*
-           #:*track-text-follow*
+           #:*track-text-follow* #:*track-linger* #:*track-zoom-out-omega*
            #:plan-tracked-timeline
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
