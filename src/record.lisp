@@ -479,6 +479,7 @@ recording plist."
                                   (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                                   (zoom dir:*zoom-level*)
                                   (zoom-min dir:*zoom-min*)
+                                  (track dir:*track*)
                                   (zoom-merge-gap dir:*zoom-merge-gap*)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
@@ -496,6 +497,7 @@ function of REC -- no capture -- so it can be re-run against one capture with
 different config. Return (values out n-frames)."
   (let ((dir:*zoom-level*        zoom)
         (dir:*zoom-min*          zoom-min)
+        (dir:*track*             track)
         (dir:*zoom-merge-gap*    zoom-merge-gap)
         (dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
@@ -577,6 +579,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (audio nil)
                            (zoom dir:*zoom-level*)
                            (zoom-min dir:*zoom-min*)
+                           (track dir:*track*)
                            (zoom-merge-gap dir:*zoom-merge-gap*)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
                            (cursor-anticipate dir:*cursor-anticipate*)
@@ -594,7 +597,7 @@ re-rendered. Return (values out n-frames)."
                           :aspect aspect :region region
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
                           :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
-                          :zoom zoom :zoom-min zoom-min :zoom-merge-gap zoom-merge-gap
+                          :zoom zoom :zoom-min zoom-min :track track :zoom-merge-gap zoom-merge-gap
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
                           :out out)))

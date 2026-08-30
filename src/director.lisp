@@ -33,6 +33,8 @@
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
+           #:*track* #:*track-omega-pan* #:*track-omega-zoom* #:*track-anticipate*
+           #:plan-tracked-timeline
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -413,16 +415,123 @@ pans between them, so brief pauses don't cause the view to zoom out and back in.
       (push (frame dur 1.0 0.5 0.5) kfs)                 ; close wide
       (%clean-timeline (nreverse kfs)))))
 
-(defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
-                                   (zoom *zoom-level*) (zoom-min *zoom-min*)
-                                   (lead *zoom-lead*) (tail *zoom-tail*)
+;;; ------------------------------------------------------------------
+;;; Tracked camera (green-screen-1em/muw/rac/bx2). Instead of one static zoom per
+;;; activity group, drive a continuous camera: each moment targets where the
+;;; screen is changing (with a forward look-ahead for anticipation), and a
+;;; critically-damped spring glides the centre and zoom after it -- a smooth,
+;;; cameraperson-style pan/zoom. Emitted as a dense keyframe path.
+
+(defparameter *track* t
+  "When true, plan-timeline uses the continuous tracked camera (smooth pan/zoom
+following the changing region) instead of static per-group punch-ins.")
+(defparameter *track-omega-pan* 6.0
+  "Camera pan-spring stiffness (rad/s). Lower = slower, more cinematic glide.")
+(defparameter *track-omega-zoom* 4.0
+  "Camera zoom-spring stiffness (rad/s).")
+(defparameter *track-anticipate* 0.35
+  "Seconds of look-ahead: target where activity is heading so the frame leads it.")
+(defparameter *track-window* 0.5
+  "Half-width (s) of the activity window sampled around each moment.")
+(defparameter *track-center-deadband* 0.012
+  "UV deadband: target centre moves under this are ignored (anti-jitter).")
+
+(defun %window-activity (session t0 t1 &key (max-rect *damage-max-rect*))
+  "Localized activity in [T0,T1]: return (values cx cy spread present-p) where
+CX,CY is the centre (damage centroid, grown to include the cursor) and SPREAD is
+the max UV extent of the activity bbox. PRESENT-P is NIL when nothing localized
+is happening (idle -> the camera should ease back to wide)."
+  (let ((w (session-width session)) (h (session-height session))
+        (sx 0.0) (sy 0.0) (n 0)
+        (x0 nil) (y0 nil) (x1 nil) (y1 nil))
+    (flet ((acc (ax ay) (setf x0 (if x0 (min x0 ax) ax) y0 (if y0 (min y0 ay) ay)
+                              x1 (if x1 (max x1 ax) ax) y1 (if y1 (max y1 ay) ay))))
+      (dolist (d (session-damage session))
+        (destructuring-bind (dt dx0 dy0 dx1 dy1) d
+          (when (and (<= t0 dt t1) (<= (- dx1 dx0) max-rect) (<= (- dy1 dy0) max-rect))
+            (incf sx (* 0.5 (+ dx0 dx1))) (incf sy (* 0.5 (+ dy0 dy1))) (incf n)
+            (acc dx0 dy0) (acc dx1 dy1))))
+      (if (plusp n)
+          (let ((ccx (/ sx n)) (ccy (/ sy n)))
+            ;; keep the pointer in frame: grow the bbox toward the cursor a little
+            (multiple-value-bind (curx cury) (cursor-at session (* 0.5 (+ t0 t1)))
+              (when curx (acc (/ curx w) (/ cury h))))
+            (values ccx ccy (max (- x1 x0) (- y1 y0)) t))
+          ;; no localized change -> not "present"; report the cursor for continuity
+          (multiple-value-bind (curx cury) (cursor-at session (* 0.5 (+ t0 t1)))
+            (if curx (values (/ curx w) (/ cury h) 0.0 nil)
+                (values 0.5 0.5 0.0 nil)))))))
+
+(defun plan-tracked-timeline (session
+                              &key (zoom *zoom-level*) (zoom-min *zoom-min*)
+                                   (omega-pan *track-omega-pan*)
+                                   (omega-zoom *track-omega-zoom*)
+                                   (anticipate *track-anticipate*)
+                                   (window *track-window*)
                                    (padding 0.04) (corner 0.09)
                                    (shadow-blur 0.03) (shadow-alpha 0.5)
                                    (bg '(0.11 0.12 0.15)))
-  "Full Director pass: SESSION -> activity segments -> zoom keyframe timeline
-directly renderable by the compositor's render-timeline. ACTIVITY selects the
-source: :events (clicks/keys), :dwell (cursor lingering), or :auto (events if
-the session has any, else dwell)."
+  "Continuous tracked-camera timeline: a spring-damped centre + zoom that follow
+the changing region over SESSION's duration. Covers pan tracking, adaptive
+'breathing' zoom, and anticipatory lead-in. Returns a dense keyframe timeline."
+  (let* ((dur (session-duration session))
+         (dt (/ 1.0 60.0))                ; spring integration step
+         (emit-every 3)                   ; keyframe density (~20/s)
+         ;; camera state: centre (cx,cy) + velocities, zoom (z) + velocity.
+         (cx 0.5) (cy 0.5) (vx 0.0) (vy 0.0)
+         (z 1.0) (vz 0.0)
+         (tcx 0.5) (tcy 0.5)              ; last committed target centre (deadband)
+         (kfs '()) (i 0))
+    (flet ((frame (time zoom ccx ccy)
+             (kf:make-keyframe :time (max 0.0 (min dur (float time 1.0)))
+                               :zoom (float zoom 1.0)
+                               :center-x (float ccx 1.0) :center-y (float ccy 1.0)
+                               :padding padding :corner-radius corner
+                               :shadow-blur shadow-blur :shadow-alpha shadow-alpha
+                               :bg-color bg)))
+      (loop for tm = 0.0 then (+ tm (float dt 1.0))
+            while (<= tm (+ dur (float dt 1.0)))
+            do (multiple-value-bind (ax ay spread present)
+                   ;; asymmetric window: look a little back, further forward
+                   ;; (anticipation) so the camera leads the action.
+                   (%window-activity session (max 0.0 (- tm window))
+                                     (min dur (+ tm anticipate window)))
+                 ;; target centre (deadband against micro-jitter) + target zoom.
+                 (when (> (+ (abs (- ax tcx)) (abs (- ay tcy))) *track-center-deadband*)
+                   (setf tcx ax tcy ay))
+                 (let* ((zfit (if present
+                                  (%fit-zoom spread spread zoom *zoom-fit-margin*)
+                                  1.0))
+                        (tz (cond ((not present) 1.0)               ; idle -> wide
+                                  ((and zoom-min (> zoom-min zfit)) zoom-min)
+                                  (t zfit))))
+                   ;; advance the springs one step toward the targets
+                   (multiple-value-setq (cx vx) (spring-step cx vx tcx omega-pan dt))
+                   (multiple-value-setq (cy vy) (spring-step cy vy tcy omega-pan dt))
+                   (multiple-value-setq (z  vz) (spring-step z  vz tz  omega-zoom dt))
+                   (when (zerop (mod i emit-every))
+                     (push (frame tm (max 1.0 z) cx cy) kfs))
+                   (incf i))))
+      ;; clean open/close; %clean-timeline sorts by time and dedups collisions
+      (push (frame 0.0 1.0 0.5 0.5) kfs)
+      (push (frame dur (max 1.0 z) cx cy) kfs)
+      (%clean-timeline kfs))))
+
+(defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
+                                   (zoom *zoom-level*) (zoom-min *zoom-min*)
+                                   (lead *zoom-lead*) (tail *zoom-tail*)
+                                   (track *track*)
+                                   (padding 0.04) (corner 0.09)
+                                   (shadow-blur 0.03) (shadow-alpha 0.5)
+                                   (bg '(0.11 0.12 0.15)))
+  "Full Director pass: SESSION -> zoom keyframe timeline directly renderable by
+the compositor. When TRACK, a continuous spring-damped camera follows the
+changing region (smooth pan/zoom). Otherwise static per-group punch-ins, where
+ACTIVITY selects the source: :events (clicks/keys), :dwell, or :auto."
+  (if track
+      (plan-tracked-timeline session :zoom zoom :zoom-min zoom-min
+                             :padding padding :corner corner
+                             :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)
   (schedule-zooms session
                   (ecase activity
                     (:events (detect-activity session :gap gap))
@@ -432,7 +541,7 @@ the session has any, else dwell)."
                                  (detect-dwell-activity session))))
                   :zoom zoom :zoom-min zoom-min :lead lead :tail tail
                   :padding padding :corner corner
-                  :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg))
+                  :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)))
 
 ;;; ------------------------------------------------------------------
 ;;; Synthetic fixtures. A deterministic session (no RNG, so tests are stable):

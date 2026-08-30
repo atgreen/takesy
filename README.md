@@ -15,8 +15,8 @@ into a finished mp4. You just record; takesy directs the shot.
 
 ## Features
 
-- **Auto-zoom on activity** — punches in where you're working, pans between
-  spots, and eases back out.
+- **Tracked camera** — a smooth, spring-damped pan and zoom that follows where
+  the screen is changing, breathing tighter or wider as activity concentrates.
 - **Never crops the action** — watches the screen (frame diffs) and fits the
   zoom to the active region, so relevant changes always stay in frame.
 - **Smoothed cursor** — a speed-adaptive spring that aims at your clicks (cutting
@@ -143,6 +143,7 @@ Dial the auto-zoom and cursor feel to taste:
 | --- | --- | --- |
 | `--zoom F` | punch-in zoom factor for activity | `1.8` |
 | `--zoom-min F` | floor zoom for activity too spread out to auto-fit (e.g. full-screen apps); centers on the cursor; `≤1` disables | `1.6` |
+| `--track on/off` | smooth camera that pans/zooms to follow the changing region (off = static per-activity punch-ins) | `on` |
 | `--zoom-merge-gap S` | idle gap (s) below which the zoom pans between spots instead of zooming out and back in | `2.5` |
 | `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher is snappier with less lag | `30.0` |
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.4` |

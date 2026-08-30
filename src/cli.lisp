@@ -174,6 +174,8 @@ direction tuning (auto-zoom + cursor feel):
   --zoom   F              punch-in zoom factor for activity     (default 1.8)
   --zoom-min F            floor zoom for activity too spread out to auto-fit
                           (full-screen apps), centered on cursor (default 1.6; <=1 off)
+  --track on|off          smooth camera that pans/zooms to follow the changing
+                          region (default on; off = static per-activity punch-ins)
   --zoom-merge-gap S      idle gap below which zoom pans instead
                           of zooming out and back in            (default 2.5)
   --cursor-omega-fast R   cursor-spring stiffness when moving
@@ -224,6 +226,9 @@ option alist O, applying defaults. Shared by `record` and `render`."
           :zoom              (opt-num o "zoom" 1.8)
           :zoom-min          (let ((v (opt-num o "zoom-min" 1.6)))  ; default on; <=1 disables
                                (when (> v 1.0) v))
+          :track             (let ((v (opt o "track" nil)))
+                               (not (and v (member (string-downcase (string-trim " " v))
+                                                   '("off" "no" "false" "0") :test #'string=))))
           :zoom-merge-gap    (opt-num o "zoom-merge-gap" 2.5)
           :cursor-omega-fast (opt-num o "cursor-omega-fast" 30.0)
           :cursor-anticipate (opt-num o "cursor-anticipate" 0.4)
