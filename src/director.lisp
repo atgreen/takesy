@@ -35,6 +35,7 @@
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
            #:*track* #:*cursor-contain* #:*cursor-window* #:*cursor-margin*
+           #:*cursor-relax* #:*camera-cursor-tau*
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -629,6 +630,27 @@ forth, so the frame settles to hold the whole sweep instead of chasing it.")
   "How fast (UV/s) the held containment box shrinks back toward the pointer once it
 stops ranging wide. It EXPANDS instantly to hold a dart, then relaxes slowly -- so a
 back-and-forth pointer settles the frame wide instead of pumping the zoom.")
+(defparameter *camera-cursor-tau* 0.15
+  "Low-pass time constant (s) applied to the pointer BEFORE the camera frames it, so
+hand tremor / high-frequency motion doesn't make the camera jitter. Only the camera
+sees this smoothing; the drawn cursor overlay stays on the accurate track. 0 = off.")
+
+(defun %smooth-cursor-track (samples tau)
+  "Return a low-passed (EMA, time-constant TAU seconds) copy of a cursor SAMPLES
+list, preserving times. Damps jitter with minimal lag. TAU<=0 or empty -> SAMPLES."
+  (if (or (null samples) (<= tau 0.0))
+      samples
+      (let ((px (cursor-sample-x (first samples)))
+            (py (cursor-sample-y (first samples)))
+            (pt (cursor-sample-time (first samples)))
+            (out '()))
+        (dolist (s samples (nreverse out))
+          (let* ((dt (max 0.0 (- (cursor-sample-time s) pt)))
+                 (a (- 1.0 (exp (- (/ dt tau))))))   ; frame-rate-independent EMA
+            (setf px (+ px (* a (- (cursor-sample-x s) px)))
+                  py (+ py (* a (- (cursor-sample-y s) py)))
+                  pt (cursor-sample-time s))
+            (push (make-cursor-sample :time (cursor-sample-time s) :x px :y py) out))))))
 
 (defun %cursor-window-bbox (session t0 t1)
   "UV bounding box the cursor covers over [T0,T1] (dense track plus interpolated
@@ -863,7 +885,13 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
          (sv (coerce shots 'vector)) (nsh (length sv))
          (kfs '()) (i 0)
          (have-cursor (and (session-cursor session) t))
-         (held nil))                    ; decaying containment box (UV x0 y0 x1 y1)
+         (held nil)                     ; decaying containment box (UV x0 y0 x1 y1)
+         ;; The camera frames a LOW-PASSED cursor so hand tremor doesn't jitter it;
+         ;; the overlay still draws the accurate track (green-screen).
+         (cam-session (make-session :width (session-width session)
+                                    :height (session-height session)
+                                    :cursor (%smooth-cursor-track (session-cursor session)
+                                                                  *camera-cursor-tau*))))
     (flet ((frame (time zoom ccx ccy)
              (kf:make-keyframe :time (max 0.0 (min dur (float time 1.0)))
                                :zoom (float zoom 1.0)
@@ -894,7 +922,7 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                      ;; on a ranging pointer instead of pumping frame-to-frame.
                      (when (and *cursor-contain* have-cursor)
                        (multiple-value-bind (wx0 wy0 wx1 wy1)
-                           (%cursor-window-bbox session (- tm *cursor-window*)
+                           (%cursor-window-bbox cam-session (- tm *cursor-window*)
                                                 (+ tm *cursor-window*))
                          (setf held (%relax-box held (when wx0 (list wx0 wy0 wx1 wy1))
                                                 (float dt 1.0)))))
