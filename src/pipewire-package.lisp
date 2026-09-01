@@ -16,7 +16,8 @@
   (:use #:cl)
   (:nicknames #:tk-pw)
   (:export #:capture-one-frame #:capture-frame-to-png
-           #:record-frames #:load-recording))
+           #:record-frames #:load-recording
+           #:format->gl-source-format))
 
 (in-package #:takesy/pipewire)
 

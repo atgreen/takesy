@@ -96,13 +96,17 @@ Usage: (let ((join (capture-click-times (lambda () *done*)))) ... (funcall join)
              (sb-thread:make-thread
               (lambda ()
                 (handler-case
-                    (let ((streams (mapcar (lambda (p)
-                                             (open p :element-type '(unsigned-byte 8)
-                                                     :direction :input))
-                                           devs))
+                    (let ((streams '())
                           (rec (make-array +input-event-size+ :element-type '(unsigned-byte 8))))
                       (unwind-protect
-                           (loop until (funcall stop-fn) do
+                           (progn
+                             ;; Open incrementally so a failure partway through still
+                             ;; closes the devices already opened (green-screen-zqb.5).
+                             (dolist (p devs)
+                               (push (open p :element-type '(unsigned-byte 8)
+                                             :direction :input)
+                                     streams))
+                             (loop until (funcall stop-fn) do
                              (let ((any nil))
                                (dolist (s streams)
                                  (when (listen s)
@@ -112,7 +116,7 @@ Usage: (let ((join (capture-click-times (lambda () *done*)))) ... (funcall join)
                                        (when (eq (dir:input-event-kind ev) :click)
                                          (sb-thread:with-mutex (lock)
                                            (vector-push-extend (dir:input-event-time ev) times)))))))
-                               (unless any (sleep 0.005))))
+                               (unless any (sleep 0.005)))))
                         (dolist (s streams) (ignore-errors (close s)))))
                   (error (e)
                     (format *error-output* "  [evdev] click capture stopped (~A)~%" e))))

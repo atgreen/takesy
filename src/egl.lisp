@@ -9,8 +9,9 @@
 ;;;;
 ;;;; Path on this box (Intel/Mesa + NVIDIA): EGL_PLATFORM_SURFACELESS_MESA with
 ;;;; EGL_DEFAULT_DISPLAY routes via glvnd to libEGL_mesa and needs no window or
-;;;; GBM device -- ideal for FBO + glReadPixels. GBM on a DRM render node is the
-;;;; fallback for drivers without surfaceless support.
+;;;; GBM device -- ideal for FBO + glReadPixels. This is the only platform we
+;;;; bring up; a driver without EGL_MESA_platform_surfaceless errors clearly
+;;;; (a GBM-on-DRM fallback would go here but is not implemented yet).
 
 (defpackage #:takesy/egl
   (:use #:cl)
@@ -133,46 +134,56 @@
 
 (defun make-headless-context (width height)
   "Create a windowless OpenGL context sized WIDTH x HEIGHT and make it current.
-Return an EGL-CONTEXT. Tries EGL_PLATFORM_SURFACELESS_MESA first."
+Return an EGL-CONTEXT. Uses EGL_PLATFORM_SURFACELESS_MESA (the only platform
+brought up here); a driver without it errors."
   (let ((dpy (egl-get-platform-display +egl-platform-surfaceless-mesa+
-                                       (cffi:null-pointer) (cffi:null-pointer))))
+                                       (cffi:null-pointer) (cffi:null-pointer)))
+        (success nil))
     (when (cffi:null-pointer-p dpy)
       (error "eglGetPlatformDisplay(SURFACELESS_MESA) returned EGL_NO_DISPLAY: ~A"
              (egl-error-name (egl-get-error))))
-    (cffi:with-foreign-objects ((major :int32) (minor :int32))
-      (check-egl (egl-initialize dpy major minor) "eglInitialize")
-      (format t "  [egl] display up: EGL ~D.~D vendor=~A~%"
-              (cffi:mem-ref major :int32) (cffi:mem-ref minor :int32)
-              (egl-query-string dpy +egl-vendor+)))
-    (check-egl (egl-bind-api +egl-opengl-api+) "eglBindAPI(OpenGL)")
-    (let ((cfg-attrs (int-array (list +egl-surface-type+    +egl-pbuffer-bit+
-                                      +egl-renderable-type+ +egl-opengl-bit+
-                                      +egl-red-size+   8
-                                      +egl-green-size+ 8
-                                      +egl-blue-size+  8
-                                      +egl-alpha-size+ 8
-                                      +egl-depth-size+ 0
-                                      +egl-none+)))
-          (ctx-attrs (int-array (list +egl-context-major-version+ 3 +egl-none+))))
-      (unwind-protect
-           (cffi:with-foreign-objects ((configs :pointer 1) (n :int32))
-             (check-egl (egl-choose-config dpy cfg-attrs configs 1 n)
-                        "eglChooseConfig")
-             (when (zerop (cffi:mem-ref n :int32))
-               (error "eglChooseConfig matched 0 configs"))
-             (let* ((config (cffi:mem-aref configs :pointer 0))
-                    (ctx (egl-create-context dpy config (cffi:null-pointer) ctx-attrs)))
-               (when (cffi:null-pointer-p ctx)
-                 (error "eglCreateContext failed: ~A"
-                        (egl-error-name (egl-get-error))))
-               ;; Surfaceless: current with no draw/read surface; we render to an FBO.
-               (check-egl (egl-make-current dpy (cffi:null-pointer)
-                                            (cffi:null-pointer) ctx)
-                          "eglMakeCurrent(surfaceless)")
-               (make-egl-context :display dpy :config config :ctx ctx
-                                 :width width :height height)))
-        (cffi:foreign-free cfg-attrs)
-        (cffi:foreign-free ctx-attrs)))))
+    ;; Once the display is initialized it must be terminated on any failure below,
+    ;; or a failed context creation leaks the EGL display (green-screen-zqb.5).
+    (unwind-protect
+         (progn
+           (cffi:with-foreign-objects ((major :int32) (minor :int32))
+             (check-egl (egl-initialize dpy major minor) "eglInitialize")
+             (format t "  [egl] display up: EGL ~D.~D vendor=~A~%"
+                     (cffi:mem-ref major :int32) (cffi:mem-ref minor :int32)
+                     (egl-query-string dpy +egl-vendor+)))
+           (check-egl (egl-bind-api +egl-opengl-api+) "eglBindAPI(OpenGL)")
+           (let ((cfg-attrs (int-array (list +egl-surface-type+    +egl-pbuffer-bit+
+                                             +egl-renderable-type+ +egl-opengl-bit+
+                                             +egl-red-size+   8
+                                             +egl-green-size+ 8
+                                             +egl-blue-size+  8
+                                             +egl-alpha-size+ 8
+                                             +egl-depth-size+ 0
+                                             +egl-none+)))
+                 (ctx-attrs (int-array (list +egl-context-major-version+ 3 +egl-none+))))
+             (unwind-protect
+                  (cffi:with-foreign-objects ((configs :pointer 1) (n :int32))
+                    (check-egl (egl-choose-config dpy cfg-attrs configs 1 n)
+                               "eglChooseConfig")
+                    (when (zerop (cffi:mem-ref n :int32))
+                      (error "eglChooseConfig matched 0 configs"))
+                    (let* ((config (cffi:mem-aref configs :pointer 0))
+                           (ctx (egl-create-context dpy config (cffi:null-pointer) ctx-attrs)))
+                      (when (cffi:null-pointer-p ctx)
+                        (error "eglCreateContext failed: ~A"
+                               (egl-error-name (egl-get-error))))
+                      ;; Surfaceless: current with no draw/read surface; render to an FBO.
+                      (check-egl (egl-make-current dpy (cffi:null-pointer)
+                                                   (cffi:null-pointer) ctx)
+                                 "eglMakeCurrent(surfaceless)")
+                      (prog1 (make-egl-context :display dpy :config config :ctx ctx
+                                               :width width :height height)
+                        (setf success t))))
+               (cffi:foreign-free cfg-attrs)
+               (cffi:foreign-free ctx-attrs))))
+      (unless success
+        (ignore-errors (egl-terminate dpy))
+        (ignore-errors (egl-release-thread))))))
 
 (defun destroy-context (c)
   "Tear down the EGL context/display. Best-effort, safe to call once."

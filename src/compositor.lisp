@@ -657,12 +657,14 @@ bitrate scaled to resolution (~0.12 bits/pixel, screen content compresses well).
   (let ((s (string-downcase (namestring path))))
     (and (>= (length s) 4) (string= (subseq s (- (length s) 4)) ".gif"))))
 
-(defun %open-frame-encoder (path width height fps &key audio)
+(defun %open-frame-encoder (path width height fps &key audio (audio-offset 0.0))
   "Launch ffmpeg reading rawvideo RGBA WxH from stdin, encoding to PATH. Encodes
 H.264 (muxing AUDIO if given, trimmed to the shorter stream), or -- when PATH ends
 in .gif -- an animated GIF via a single-pass palette filtergraph (no audio; GIFs
-have none). Return a FRAME-ENCODER: write each frame's bytes to its STREAM, then
-%CLOSE-FRAME-ENCODER to finalize."
+have none). AUDIO-OFFSET seconds are skipped from the front of the audio input, so
+audio that began recording before the first video frame lines up with the picture
+(green-screen: PiP/audio sync). Return a FRAME-ENCODER: write each frame's bytes to
+its STREAM, then %CLOSE-FRAME-ENCODER to finalize."
   (let* ((gif     (%gif-output-p path))
          (encoder (if gif "gif" (pick-h264-encoder)))
          (mux     (and (not gif) audio (probe-file audio)))
@@ -681,6 +683,10 @@ have none). Return a FRAME-ENCODER: write each frame's bytes to its STREAM, then
                                      "[b][p]paletteuse=dither=bayer:diff_mode=rectangle")
                                     path))
                       (append input
+                              ;; -ss before -i seeks the audio input, dropping its
+                              ;; pre-first-frame lead so it lines up with the video.
+                              (when (and mux (> audio-offset 0.01))
+                                (list "-ss" (format nil "~,3F" audio-offset)))
                               (when mux (list "-i" (namestring mux)))
                               (list "-c:v" encoder)
                               (%quality-flags encoder width height fps)
@@ -921,29 +927,49 @@ in vec2 v_uv;
 out vec4 frag;
 uniform sampler2D u_tex;
 uniform vec2  u_canvas;
-uniform vec2  u_center;   // inset centre, framebuffer px
-uniform float u_radius;   // inset radius, px
-uniform float u_aspect;   // webcam width/height (for cover-fit into the circle)
+uniform vec2  u_center;    // inset centre, framebuffer px
+uniform vec2  u_half;      // inset half-size (square), px
+uniform float u_corner;    // corner radius, px (= u_half for a circle)
+uniform float u_aspect;    // webcam width/height (for cover-fit into the box)
+uniform float u_zoom;      // >=1 zooms into the source (tighter framing)
+uniform vec2  u_pan;       // source-uv pan after zoom
 uniform vec3  u_border;
+uniform float u_border_w;  // border width, px (0 = none)
+
+// Signed distance to a rounded box centred at the origin: <0 inside, >0 outside.
+float sd_round_box(vec2 p, vec2 b, float r) {
+  vec2 q = abs(p) - b + r;
+  return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
 
 void main() {
-  vec2 P = v_uv * u_canvas;
-  float d = length(P - u_center);
-  if (d > u_radius) discard;                           // outside the circle
-  // cover-fit the webcam into the circle (centre-crop the wider axis)
-  vec2 uv = (P - u_center) / (2.0 * u_radius) + vec2(0.5);
+  vec2 P   = v_uv * u_canvas;
+  vec2 rel = P - u_center;
+  float d  = sd_round_box(rel, u_half, u_corner);
+  float aa = 1.0;                       // ~1px edge anti-alias
+  if (d > aa) discard;                  // fully outside the shape
+  // cover-fit the webcam into the square footprint (centre-crop the wider axis)
+  vec2 uv = rel / (2.0 * u_half) + vec2(0.5);
   if (u_aspect > 1.0) uv.x = (uv.x - 0.5) / u_aspect + 0.5;   // wide: crop sides
   else                uv.y = (uv.y - 0.5) * u_aspect + 0.5;   // tall: crop top/bottom
-  vec3 col = texture(u_tex, uv).rgb;
-  // soft white ring border on the outer edge
-  float edge = smoothstep(u_radius - 2.0, u_radius, d);
-  col = mix(col, u_border, edge);
-  frag = vec4(col, 1.0);
+  // framing: zoom into the source around its centre, then pan (set in the preview)
+  uv = (uv - 0.5) / u_zoom + vec2(0.5) - u_pan;
+  vec3 col = texture(u_tex, clamp(uv, 0.0, 1.0)).rgb;
+  // border: the outer band within u_border_w of the edge takes the border colour
+  if (u_border_w > 0.0) {
+    float b = smoothstep(-u_border_w - aa, -u_border_w + aa, d);
+    col = mix(col, u_border, b);
+  }
+  float alpha = 1.0 - smoothstep(-aa, aa, d);   // soft anti-aliased outer edge
+  frag = vec4(col, alpha);
 }")
 
-(defun draw-webcam (program vao tex cx cy radius aspect border out-w out-h)
-  "Draw a circle-cropped webcam inset (texture TEX, cover-fit) centred at
-framebuffer (CX,CY) with RADIUS px and a soft border."
+(defun draw-webcam (program vao tex cx cy half corner aspect border border-w out-w out-h
+                    &optional (zoom 1.0) (pan-x 0.0) (pan-y 0.0))
+  "Draw a rounded-box webcam inset (texture TEX, cover-fit) centred at framebuffer
+(CX,CY). HALF is the square half-size px; CORNER is the corner radius px (= HALF for
+a circle); BORDER-W is the border width px (0 = none) in colour BORDER (r g b). ZOOM
+(>=1) and PAN-X/PAN-Y frame the source (set via the preview tool)."
   (gl:use-program program)
   (gl:active-texture :texture0)
   (gl:bind-texture :texture-2d tex)
@@ -951,8 +977,12 @@ framebuffer (CX,CY) with RADIUS px and a soft border."
     (let ((l (uni "u_tex")))    (when (>= l 0) (gl:uniformi l 0)))
     (let ((l (uni "u_canvas"))) (when (>= l 0) (gl:uniformf l (float out-w 1.0) (float out-h 1.0))))
     (let ((l (uni "u_center"))) (when (>= l 0) (gl:uniformf l (float cx 1.0) (float cy 1.0))))
-    (let ((l (uni "u_radius"))) (when (>= l 0) (gl:uniformf l (float radius 1.0))))
+    (let ((l (uni "u_half")))   (when (>= l 0) (gl:uniformf l (float half 1.0) (float half 1.0))))
+    (let ((l (uni "u_corner"))) (when (>= l 0) (gl:uniformf l (float corner 1.0))))
     (let ((l (uni "u_aspect"))) (when (>= l 0) (gl:uniformf l (float aspect 1.0))))
+    (let ((l (uni "u_zoom")))   (when (>= l 0) (gl:uniformf l (max 1.0 (float zoom 1.0)))))
+    (let ((l (uni "u_pan")))    (when (>= l 0) (gl:uniformf l (float pan-x 1.0) (float pan-y 1.0))))
+    (let ((l (uni "u_border_w"))) (when (>= l 0) (gl:uniformf l (float border-w 1.0))))
     (let ((l (uni "u_border"))) (when (>= l 0) (destructuring-bind (r g b) border
                                                  (gl:uniformf l (float r 1.0) (float g 1.0) (float b 1.0))))))
   (gl:enable :blend)
@@ -971,7 +1001,10 @@ framebuffer (CX,CY) with RADIUS px and a soft border."
                                    (clicks nil) (ripple-color '(1.0 1.0 1.0))
                                    (webcam-fn nil) (webcam-dims nil)
                                    (webcam-pos :br) (webcam-size 0.22)
-                                   (audio nil)
+                                   (webcam-corner 1.0)
+                                   (webcam-border 0.012) (webcam-border-color '(1.0 1.0 1.0))
+                                   (webcam-zoom 1.0) (webcam-pan-x 0.0) (webcam-pan-y 0.0)
+                                   (audio nil) (audio-offset 0.0)
                                    (content-aspect 1.0)
                                    (crop '(0.0 0.0 1.0 1.0))
                                    (path "/tmp/takesy-seq.mp4"))
@@ -1006,14 +1039,19 @@ and updated each frame."
                                              :source-format :rgba :filter :linear)))
              (wc-aspect (when webcam-dims (/ (float (car webcam-dims) 1.0)
                                              (float (cdr webcam-dims) 1.0))))
-             (wc-radius (* 0.5 out-h webcam-size))
+             (wc-half   (* 0.5 out-h webcam-size))            ; square half-size, px
+             ;; corner radius px = WEBCAM-CORNER as a fraction of the half-size:
+             ;; 1.0 -> a circle (corner = half-size), 0.0 -> a hard square, between
+             ;; -> a rounded square. One control; the shape falls out of it.
+             (wc-corner (max 0.0 (min wc-half (* webcam-corner wc-half))))
+             (wc-border-px (* webcam-border out-h webcam-size))  ; frac of diameter
              (wc-margin (* out-h 0.035))
              (wc-cx (ecase webcam-pos
-                      ((:br :tr) (- out-w wc-margin wc-radius))
-                      ((:bl :tl) (+ wc-margin wc-radius))))
+                      ((:br :tr) (- out-w wc-margin wc-half))
+                      ((:bl :tl) (+ wc-margin wc-half))))
              (wc-cy (ecase webcam-pos
-                      ((:br :bl) (- out-h wc-margin wc-radius))
-                      ((:tr :tl) (+ wc-margin wc-radius))))
+                      ((:br :bl) (- out-h wc-margin wc-half))
+                      ((:tr :tl) (+ wc-margin wc-half))))
              (rip-dur   0.5)                    ; ripple lifetime, seconds
              (rip-max-r (* out-h 0.07))         ; peak ring radius, px
              (rip-thick (* out-h 0.010))        ; ring thickness, px
@@ -1036,7 +1074,8 @@ and updated each frame."
              (img-w    (when cursor-image
                          (* img-h (/ (float (second cursor-image) 1.0)
                                      (float (third cursor-image) 1.0))))))
-        (let ((enc (%open-frame-encoder path out-w out-h fps :audio audio)))
+        (let ((enc (%open-frame-encoder path out-w out-h fps
+                                        :audio audio :audio-offset audio-offset)))
           (unwind-protect
                (dotimes (i n-frames)
                  (when (> i 0)
@@ -1081,14 +1120,15 @@ and updated each frame."
                                                     (* img-w press) (* img-h press) cursor-hotspot
                                                     frame out-w out-h)
                                  (draw-cursor curs-prog vao px py (* cur-size press) frame out-w out-h)))))))
-                   ;; Webcam picture-in-picture: circle-cropped inset on top.
+                   ;; Webcam picture-in-picture: rounded-box inset on top.
                    (when wc-prog
                      (when (> i 0)
                        (update-texture-rgba wc-tex (funcall webcam-fn i)
                                             (car webcam-dims) (cdr webcam-dims)
                                             :source-format :rgba))
-                     (draw-webcam wc-prog vao wc-tex wc-cx wc-cy wc-radius
-                                  wc-aspect '(1.0 1.0 1.0) out-w out-h))
+                     (draw-webcam wc-prog vao wc-tex wc-cx wc-cy wc-half wc-corner
+                                  wc-aspect webcam-border-color wc-border-px out-w out-h
+                                  webcam-zoom webcam-pan-x webcam-pan-y))
                    (gl:finish)
                    ;; stream this frame straight to ffmpeg -- no raw dump on disk
                    (%write-frame enc (read-rgba out-w out-h))))

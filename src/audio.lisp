@@ -97,7 +97,14 @@ Best-effort -- never signals."
     (ignore-errors
      (let ((in (uiop:process-info-input (audio-handle-proc handle))))
        (when in (write-char #\q in) (finish-output in) (close in))))
-    (ignore-errors (uiop:wait-process (audio-handle-proc handle)))
+    ;; After 'q' ffmpeg just finalizes the WAV -- normally instant. Bound the wait
+    ;; so a wedged recorder can't hang capture teardown (green-screen-zqb.4).
+    (let ((proc (audio-handle-proc handle)))
+      (ignore-errors
+       (handler-case (sb-ext:with-timeout 15 (uiop:wait-process proc))
+         (sb-ext:timeout ()
+           (ignore-errors (uiop:terminate-process proc :urgent t))
+           (ignore-errors (uiop:wait-process proc))))))
     (let ((path (audio-handle-path handle)))
       (if (%nonempty-wav-p path)
           path

@@ -26,7 +26,13 @@ into a finished mp4. You just record; takesy directs the shot.
 - **Custom cursor** — draw your own cursor image instead of the built-in arrow.
 - **Click ripples** — expanding rings on click, with a subtle cursor press animation.
 - **Trim idle time** — cut dead stretches (no screen change) to tighten long demos.
-- **Webcam inset** — composite a webcam clip as a circle-cropped picture-in-picture.
+- **Webcam inset** — record your camera live during capture (`--webcam /dev/video0`
+  or `--webcam auto`), or composite a pre-recorded clip, as a picture-in-picture —
+  its corner radius sweeps from circle through rounded to square, with configurable
+  border width and colour.
+- **Webcam framing preview** — whenever you record a live webcam, takesy first
+  opens a local web page to pick the input camera and frame yourself (drag to pan,
+  scroll to zoom); what you see is what gets recorded.
 - **Countdown** — a 3-2-1 before recording starts, so you can get ready.
 - **Pause / resume** — `kill -USR1 <pid>` toggles capture; paused time is cut, timeline stays gapless.
 - **Audio** — optionally record desktop sound, your mic, or both, muxed into the mp4.
@@ -91,6 +97,7 @@ make install        # copies takesy to ~/.local/bin
 takesy                                 # record; click Stop in the top bar to finish
 takesy --output talk.mp4 --duration 20
 takesy --audio both                    # record desktop sound + mic too
+takesy --webcam auto                   # picture-in-picture from your webcam (live)
 takesy --cursor arrow.png              # use a custom cursor image
 takesy --bg-image wallpaper.png        # put an image behind the inset
 takesy --output demo.gif               # straight to an animated GIF (no audio)
@@ -119,7 +126,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--output PATH` | output file; a `.gif` path produces an animated GIF (no audio) instead of an mp4 | `/tmp/takesy-record.mp4` |
-| `--duration S` | maximum length — a safety cap; you set the length by clicking Stop | `30` |
+| `--duration S` | optional maximum length (safety cap); by default there's none — you set the length by clicking Stop | none |
 | `--fps N` | output frame rate | `24` |
 | `--height N` | maximum output height in px (never upscales past the content) | `1200` |
 | `--bg COLOR` | background — `blur` (default; a frosted copy of the screen), or `#RRGGBB` / a name (`black`, `white`, `dark`, `navy`, `slate`, …) for a solid | `blur` |
@@ -127,13 +134,20 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--aspect W:H` | reframe the output to an aspect (e.g. `9:16` vertical, `1:1` square); the screen is scaled to fit inside it (letterboxed, never cropped) | content aspect |
 | `--region X,Y,W,H` | frame a fixed screen region (source pixels) instead of auto-cropping to content | auto-crop |
 | `--trim-idle` | cut idle stretches (no screen change) longer than `--idle-threshold` down to `--max-idle` seconds; tightens long demos (drops audio for now) | off |
-| `--webcam PATH` | composite a webcam video/image as a circle inset (`--webcam-pos br\|bl\|tr\|tl`, `--webcam-size` fraction of height) | — |
+| `--ripples on\|off` | expanding ring on each click, with a subtle cursor press animation | `on` |
+| `--webcam SRC` | webcam inset: `SRC` = `/dev/videoN` or `auto` records the camera **live** during capture; any other path is a pre-recorded video/image | — |
+| `--webcam-corner F` | inset corner radius, fraction of half-size: `1` = circle, `0` = square, between = rounded | `1` |
+| `--webcam-border F` | inset border width, fraction of the inset (`0` = none) | `0.012` |
+| `--webcam-border-color C` | inset border colour — a name or `#RRGGBB` | `white` |
+| `--webcam-pos`, `--webcam-size` | inset corner (`br\|bl\|tr\|tl`) and diameter (fraction of height) | `br`, `0.22` |
+| `--webcam-zoom`, `--webcam-pan-x`, `--webcam-pan-y` | webcam framing — normally set in the auto preview, but can be forced | `1`, `0`, `0` |
 | `--corner-radius F` | rounded-corner radius (fraction of the content's shorter side); `0` gives square corners | `0.09` |
 | `--margin F` | inset margin around the screen, as a fraction of the frame | `0.04` |
 | `--cursor PATH` | draw a custom cursor image (PNG or anything ffmpeg reads) instead of the built-in arrow | built-in arrow |
 | `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |
 | `--cursor-size F` | cursor height as a fraction of the output height | `0.06` |
 | `--audio MODE` | record audio: `system` (desktop/monitor), `mic`, or `both` (mixed). Muxed into the mp4 as AAC; set at `capture`/`record` time | off |
+| `--countdown N` | seconds of 3-2-1 countdown before recording starts; set at `capture`/`record` time | `3` |
 
 ### The camera
 

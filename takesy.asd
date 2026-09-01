@@ -67,17 +67,30 @@
   :components ((:module "src"
                 :components ((:file "audio")))))
 
+(asdf:defsystem "takesy/webcam"
+  :description "Opt-in live webcam capture: parallel ffmpeg v4l2 recorder -> mp4."
+  :serial t
+  :components ((:module "src"
+                :components ((:file "webcam")))))
+
+(asdf:defsystem "takesy/webcam-preview"
+  :description "Pre-record web preview: pick the camera and frame (zoom/pan) yourself."
+  :depends-on ("takesy/webcam" "sb-bsd-sockets")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "webcam-preview")))))
+
 (asdf:defsystem "takesy/record"
   :description "Record orchestration: portal capture -> Director -> compositor -> mp4."
   :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor"
-               "takesy/audio" "takesy/evdev")
+               "takesy/audio" "takesy/webcam" "takesy/evdev")
   :serial t
   :components ((:module "src"
                 :components ((:file "record")))))
 
 (asdf:defsystem "takesy/cli"
   :description "takesy command-line entry point (build the executable with `make`)."
-  :depends-on ("takesy/record" "clingon")
+  :depends-on ("takesy/record" "takesy/webcam-preview" "clingon")
   :serial t
   :components ((:module "src"
                 :components ((:file "cli")))))

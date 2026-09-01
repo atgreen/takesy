@@ -12,7 +12,7 @@
   (:local-nicknames (#:portal #:takesy/portal) (#:pw #:takesy/pipewire)
                     (#:dir #:takesy/director) (#:comp #:takesy/compositor)
                     (#:kf #:takesy/keyframe)
-                    (#:evdev #:takesy/evdev))
+                    (#:evdev #:takesy/evdev) (#:wc #:takesy/webcam))
   (:export #:recording->session #:compute-damage #:compute-content-bbox
            #:compose-recording #:record-to-mp4 #:load-image-rgba
            #:capture-recording #:render-recording #:render-recording-dir))
@@ -81,17 +81,41 @@ rawvideo RGBA. Signals if the file is missing or the byte count doesn't match."
                   (parse-integer rate))))
     (values w h (float fps 1.0))))
 
-(defun %open-decoder (intermediate w h &optional (pix-fmt "bgra"))
+(defun %media-duration (path)
+  "Duration of media PATH in seconds via ffprobe, or NIL if it can't be read."
+  (ignore-errors
+   (let* ((s (uiop:run-program
+              (list "ffprobe" "-v" "error" "-show_entries" "format=duration"
+                    "-of" "default=nw=1:nk=1" path)
+              :output '(:string :stripped t) :ignore-error-status t))
+          (d (let ((*read-eval* nil)) (read-from-string s nil nil))))
+     (when (realp d) (float d 1.0)))))
+
+(defun %source-lead (src-path span)
+  "Seconds SRC-PATH (a parallel audio/webcam recorder) began BEFORE the screen's
+first frame: since all recorders stop together, its lead is its duration minus the
+SPAN of the screen capture. Used to trim each source's pre-roll so it lines up with
+the picture (green-screen: PiP/audio sync). NIL path or unreadable -> 0."
+  (if src-path
+      (let ((d (%media-duration src-path)))
+        (if d (max 0.0 (- d (float span 1.0))) 0.0))
+      0.0))
+
+(defun %open-decoder (intermediate w h &optional (pix-fmt "bgra") fps)
   "Launch ffmpeg decoding INTERMEDIATE to a FIFO of rawvideo PIX-FMT frames; return
 a DECODER. The read end is opened after launch so ffmpeg's blocking FIFO-write open
-unblocks."
+unblocks. When FPS is given, force constant-rate output at exactly FPS -- so a
+variable-rate source (e.g. a webcam that dropped below its nominal rate) decodes to
+the same frame cadence the caller indexes by, instead of ffmpeg silently padding to
+the container's nominal rate (which plays back in slow motion). green-screen sync."
   (let* ((fifo (format nil "~A.dec.fifo" intermediate))
          (nbytes (* w h 4)))
     (ignore-errors (delete-file fifo))
     (uiop:run-program (list "mkfifo" fifo))
     (let ((proc (uiop:launch-program
-                 (list "ffmpeg" "-y" "-loglevel" "error" "-i" intermediate
-                       "-f" "rawvideo" "-pix_fmt" pix-fmt fifo)
+                 (append (list "ffmpeg" "-y" "-loglevel" "error" "-i" intermediate)
+                         (when fps (list "-fps_mode" "cfr" "-r" (format nil "~,5F" fps)))
+                         (list "-f" "rawvideo" "-pix_fmt" pix-fmt fifo))
                  :output nil :error-output nil)))
       (make-decoder :proc proc
                     :stream (open fifo :direction :input :element-type '(unsigned-byte 8))
@@ -417,6 +441,9 @@ stretches are easy to spot. Returns the list of (t_out zoom cx cy) samples."
                                             (bg-blur nil)
                                             (clicks nil) (ripple-color '(1.0 1.0 1.0))
                                             (webcam nil) (webcam-pos :br) (webcam-size 0.22)
+                                  (webcam-corner 1.0)
+                                  (webcam-border 0.012) (webcam-border-color '(1.0 1.0 1.0))
+                                  (webcam-zoom 1.0) (webcam-pan-x 0.0) (webcam-pan-y 0.0)
                                             (audio nil)
                                             (time-warp nil) (out-duration nil)
                                             (aspect nil)
@@ -434,6 +461,12 @@ without an over-large file."
     (when (zerop nsrc) (error "recording has no frames"))
     (destructuring-bind (cx0 cy0 cx1 cy1) crop
       (let* ((span (float (getf (aref frames (1- nsrc)) :time) 1.0))
+             ;; PiP/audio sync: the parallel audio & webcam recorders start before
+             ;; the first screen frame, so each carries a pre-roll (= its duration -
+             ;; SPAN, since all sources stop together). Trim that lead off the front
+             ;; so both line up with the picture (green-screen sync bug).
+             (webcam-lead (%source-lead webcam span))
+             (audio-lead  (%source-lead audio span))
              ;; TIME-WARP maps output time -> source time (idle-removal); identity
              ;; otherwise. DUR is the OUTPUT length.
              (warp (or time-warp #'identity))
@@ -457,6 +490,9 @@ without an over-large file."
         (format t "  [record] compositing ~D src frames -> ~D output frames ~
                    (~,1Fs @ ~Dfps) crop ~,2Fx~,2F of frame -> ~Dx~D~@[ +cursor~]~%"
                 nsrc nout dur fps (- cx1 cx0) (- cy1 cy0) ow oh cursor-fn)
+        (when (or (> webcam-lead 0.01) (> audio-lead 0.01))
+          (format t "  [record] PiP sync: trimming ~,2Fs webcam / ~,2Fs audio pre-roll~%"
+                  webcam-lead audio-lead))
         (when camera-log
           (%write-camera-log camera-log timeline nout fps src-time))
         ;; source frames come from the compressed intermediate (decoded forward)
@@ -467,12 +503,25 @@ without an over-large file."
             (if webcam (%probe-video webcam) (values nil nil nil))
           (let ((dec (when (getf rec :intermediate)
                        (%open-decoder (getf rec :intermediate) fw fh)))
-                (wc-dec (when webcam (%open-decoder webcam ww wh "rgba"))))
+                ;; Force the webcam decoder to the SAME cadence webcam-fn indexes by
+                ;; (its true avg rate), so a camera that ran below its nominal fps
+                ;; doesn't decode padded-to-nominal and play in slow motion (fix).
+                (wc-dec (when webcam (%open-decoder webcam ww wh "rgba" wfps)))
+                ;; The intermediate is decoded to BGRA; the raw-file fallback keeps
+                ;; the negotiated byte order, so tell the compositor which it is
+                ;; (green-screen-f5b).
+                (source-format (if (getf rec :intermediate)
+                                   :bgra
+                                   (pw:format->gl-source-format (getf rec :format)))))
             (unwind-protect
                  (let ((webcam-fn (when webcam
-                                    ;; webcam frame at output time i (its own fps)
+                                    ;; webcam frame at output time i (its own fps),
+                                    ;; shifted past its pre-first-frame lead so it
+                                    ;; lines up with the picture (PiP sync).
                                     (lambda (i)
-                                      (%decoder-frame wc-dec (floor (* (/ i (float fps 1.0)) wfps)))))))
+                                      (%decoder-frame
+                                       wc-dec
+                                       (floor (* (+ (/ i (float fps 1.0)) webcam-lead) wfps)))))))
                   (flet ((src (i)   ; nearest source frame for output frame i (warped)
                           (let ((idx (%nearest-frame-index frames (funcall src-time i))))
                             (if dec
@@ -484,7 +533,7 @@ without an over-large file."
                                   cache-bytes)))))
                    (comp:render-frame-sequence
                     timeline #'src nout ow oh
-                    :fps fps :source-format :bgra
+                    :fps fps :source-format source-format
                     :source-width fw :source-height fh
                     :time-fn src-time
                     :cursor-fn cursor-fn
@@ -494,8 +543,11 @@ without an over-large file."
                     :clicks clicks :ripple-color ripple-color
                     :webcam-fn webcam-fn :webcam-dims (when webcam (cons ww wh))
                     :webcam-pos webcam-pos :webcam-size webcam-size
+                    :webcam-corner webcam-corner
+                    :webcam-border webcam-border :webcam-border-color webcam-border-color
+                    :webcam-zoom webcam-zoom :webcam-pan-x webcam-pan-x :webcam-pan-y webcam-pan-y
                     :content-aspect content-aspect
-                    :audio audio
+                    :audio audio :audio-offset audio-lead
                     :crop crop
                     :path out)))
               (%close-decoder dec)
@@ -508,11 +560,13 @@ didn't know at write time, e.g. :click-times)."
                      :direction :output :if-exists :supersede :if-does-not-exist :create)
     (with-standard-io-syntax (prin1 rec s))))
 
-(defun capture-recording (&key (duration 30.0) (fps 24) (dir "/tmp/takesy-rec")
-                               (audio nil) (capture-clicks t) (countdown 3))
+(defun capture-recording (&key (duration nil) (fps 24) (dir "/tmp/takesy-rec")
+                               (audio nil) (capture-clicks t) (countdown 3)
+                               (webcam nil)
+                               (webcam-zoom 1.0) (webcam-pan-x 0.0) (webcam-pan-y 0.0))
   "Capture stage only: pop the screen-share dialog and record until you end the
-share -- click GNOME's Stop button in the top bar -- or DURATION seconds elapse as
-a safety cap. Frames (and the compressed intermediate) are written under DIR, and
+share -- click GNOME's Stop button in the top bar. DURATION, when non-NIL, is an
+optional safety cap in seconds (NIL = record until you click Stop). Frames (and the compressed intermediate) are written under DIR, and
 RECORD-FRAMES persists a manifest.sexp there so the recording is self-contained and
 can be re-rendered later with LOAD-RECORDING + RENDER-RECORDING. FPS only sets the
 capture throttle (a bit above the output rate). AUDIO (:system | :mic | :both)
@@ -522,7 +576,7 @@ background thread records mouse-click times (evdev, best-effort -- needs the
 recording plist."
   (portal:with-screencast (fd node :cursor-mode portal:+cursor-metadata+)
     (format t "  [capture] recording... click the Stop button in the GNOME top bar ~
-                 to finish (or ~,0Fs max).~%" duration)
+                 to finish~@[ (or ~,0Fs max)~].~%" duration)
     ;; Capture throttle a bit above the output rate so we keep enough source
     ;; frames; the real limit is the compositor's on-change delivery.
     ;; Warn up front when we can't read input devices -- otherwise ripples just
@@ -541,15 +595,33 @@ recording plist."
            ;; start so click times align with the frame timeline.
            (join (when capture-clicks
                    (ignore-errors (evdev:capture-click-times (lambda () done)))))
+           ;; Live webcam (green-screen-asp): a parallel v4l2 recorder over the same
+           ;; window, started here so it aligns with frame capture (past the
+           ;; countdown), best-effort like audio.
+           (wc-handle (when webcam (wc:start-webcam dir webcam :fps (max fps 30))))
            (rec  (pw:record-frames fd node :duration duration :max-fps (max fps 30)
-                                   :dir dir :audio audio)))
+                                   :dir dir :audio audio))
+           (dirty nil))
       (setf done t)
+      ;; Finalize the webcam clip and store its path so render composites it as PiP.
+      (when wc-handle
+        (let ((path (ignore-errors (wc:stop-webcam wc-handle))))
+          (when path
+            (setf (getf rec :webcam) path dirty t)
+            ;; Persist the preview's framing so a later render reproduces it.
+            (when (or (/= webcam-zoom 1.0) (/= webcam-pan-x 0.0) (/= webcam-pan-y 0.0))
+              (setf (getf rec :webcam-zoom) webcam-zoom
+                    (getf rec :webcam-pan-x) webcam-pan-x
+                    (getf rec :webcam-pan-y) webcam-pan-y))
+            (format t "  [capture] webcam clip -> ~A~%" path))))
       (when join
         (let ((cts (ignore-errors (funcall join))))
           (when cts
-            (setf (getf rec :click-times) cts)
-            (%persist-manifest rec dir)
+            (setf (getf rec :click-times) cts dirty t)
             (format t "  [capture] recorded ~D click(s) for ripples~%" (length cts)))))
+      ;; Re-persist the manifest once if we spliced in anything RECORD-FRAMES
+      ;; didn't know at write time (clicks and/or webcam).
+      (when dirty (%persist-manifest rec dir))
       rec)))
 
 (defun render-recording (rec &key (fps 24) (max-height 1200)
@@ -566,6 +638,10 @@ recording plist."
                                   (region nil)
                                   (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
                                   (webcam nil) (webcam-pos :br) (webcam-size 0.22)
+                                  (webcam-corner 1.0)
+                                  (webcam-border 0.012) (webcam-border-color '(1.0 1.0 1.0))
+                                  ;; NIL so the manifest's previewed framing can fill in
+                                  (webcam-zoom nil) (webcam-pan-x nil) (webcam-pan-y nil)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
                                   (camera-log nil)
@@ -583,7 +659,15 @@ different config. Return (values out n-frames)."
   (let ((dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
-        (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image)))))
+        (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image))))
+        ;; Webcam PiP source: an explicit clip/file wins; otherwise fall back to a
+        ;; webcam clip captured live during this recording (green-screen-asp).
+        (webcam (or webcam (getf rec :webcam)))
+        ;; Framing: an explicit flag wins, else the framing chosen in the preview
+        ;; (stored in the manifest), else neutral (green-screen-1lb).
+        (webcam-zoom  (or webcam-zoom  (getf rec :webcam-zoom)  1.0))
+        (webcam-pan-x (or webcam-pan-x (getf rec :webcam-pan-x) 0.0))
+        (webcam-pan-y (or webcam-pan-y (getf rec :webcam-pan-y) 0.0)))
     (let* (;; Base framing: an explicit REGION (x y w h source px) if given, else
            ;; auto-crop to the real content (trim empty desktop borders).
            ;; Everything downstream works in this cropped frame. ASPECT (cons w . h)
@@ -628,6 +712,9 @@ different config. Return (values out n-frames)."
                          :bg-image bg-image-data :bg-blur bg-blur
                          :clicks (when ripples (getf rec :click-times))
                          :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
+                    :webcam-corner webcam-corner
+                    :webcam-border webcam-border :webcam-border-color webcam-border-color
+                    :webcam-zoom webcam-zoom :webcam-pan-x webcam-pan-x :webcam-pan-y webcam-pan-y
                          :time-warp (first warp-info) :out-duration (second warp-info)
                          ;; audio was captured alongside the frames; mux it back in.
                          ;; Idle-trim would desync it -> drop it (synced trim is TODO).
@@ -644,7 +731,7 @@ This is the re-render entry point: capture once, then re-run direction with
 different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
   (apply #'render-recording (pw:load-recording dir) render-args))
 
-(defun record-to-mp4 (&key (duration 30.0) (fps 24) (max-height 1200)
+(defun record-to-mp4 (&key (duration nil) (fps 24) (max-height 1200)
                            (bg '(0.11 0.12 0.15))
                            (corner 0.09)
                            (margin 0.04)
@@ -658,6 +745,9 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (region nil)
                            (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
                            (webcam nil) (webcam-pos :br) (webcam-size 0.22)
+                                  (webcam-corner 1.0)
+                                  (webcam-border 0.012) (webcam-border-color '(1.0 1.0 1.0))
+                                  (webcam-zoom 1.0) (webcam-pan-x 0.0) (webcam-pan-y 0.0)
                            (countdown 3)
                            (audio nil)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
@@ -669,14 +759,23 @@ capture the screen (METADATA cursor mode) until you click GNOME's Stop button (o
 DURATION as a safety cap), then direct and composite to OUT. Kept as the one-call
 path; the two halves are separately callable so a capture can be re-rendered.
 Return (values out n-frames)."
-  (let ((rec (capture-recording :duration duration :fps fps :dir dir :audio audio
-                                :countdown countdown)))
+  ;; A live webcam spec (/dev/video* or "auto") records during capture and the
+  ;; render picks the clip up from the manifest; any other WEBCAM is a file for the
+  ;; render's PiP. Never hand a live spec to render -- it would try to open it as a
+  ;; file (green-screen-asp).
+  (let* ((live (and (wc:live-spec-p webcam) webcam))
+         (rec  (capture-recording :duration duration :fps fps :dir dir :audio audio
+                                  :countdown countdown :webcam live)))
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner :margin margin
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
                           :aspect aspect :region region
+                          :webcam (unless live webcam)
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
-                          :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
+                          :webcam-pos webcam-pos :webcam-size webcam-size
+                    :webcam-corner webcam-corner
+                    :webcam-border webcam-border :webcam-border-color webcam-border-color
+                    :webcam-zoom webcam-zoom :webcam-pan-x webcam-pan-x :webcam-pan-y webcam-pan-y
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
                           :camera-log camera-log

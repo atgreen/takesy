@@ -4,6 +4,53 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **No default recording time limit** — `--duration` is now an optional safety cap
+  with no default; recording runs until you click Stop. (The disk-budget backstop
+  still bounds encoder-less captures.)
+
+### Added
+
+- **Webcam framing preview** — recording a live webcam now always opens a local web
+  page first to pick the input camera and frame yourself (drag to pan, scroll to
+  zoom). takesy owns the camera via v4l2 and streams a preview JPEG, so there's no
+  getUserMedia/permission dance; the browser `<canvas>` reproduces the PiP shader's
+  exact sampling, so the preview matches the recording. New framing controls
+  `--webcam-zoom` / `--webcam-pan-x` / `--webcam-pan-y` (usually set in the preview)
+  are saved to the manifest so a re-render reproduces the framing.
+- **Webcam PiP framing** — `--webcam-corner` shapes the inset along one continuous
+  control: `1` (default) is a circle, `0` a hard square, in between a rounded
+  square. `--webcam-border` / `--webcam-border-color` set the frame width and
+  colour. The inset shader is a unified rounded-box SDF — a circle is just the box
+  whose corner radius equals its half-size.
+- **Live webcam capture** — `--webcam /dev/videoN` (or `--webcam auto` to pick the
+  first working camera) records the webcam *during* screen capture, in parallel
+  like audio, and composites it as the circle picture-in-picture automatically.
+  `--webcam FILE` still composites a pre-recorded clip at render time.
+
+### Fixed
+
+- **Webcam PiP no longer plays in slow motion** when the camera ran below its
+  nominal rate (e.g. 30→20fps in low light). Such a clip is tagged at the nominal
+  rate but holds fewer frames; the decoder was padding it back to nominal while the
+  compositor indexed at the true rate, so it played at ~0.66×. The webcam is now
+  decoded at exactly the rate it's indexed by.
+- **Webcam/audio sync** — the parallel webcam and audio recorders start before the
+  first screen frame, so each carried a pre-roll that made the picture lag the
+  sound. The render now trims each source's lead (its duration minus the screen
+  span, since all sources stop together), aligning the webcam PiP and audio to the
+  first-frame origin.
+- **Colours no longer swap** on captures whose negotiated pixel format isn't BGRA:
+  the streaming encoder now uses the negotiated format, and the raw-frame fallback
+  tells the compositor the correct byte order.
+- **Capture-layer robustness** — firewalled the PipeWire C callbacks so a Lisp
+  condition can't unwind into C; time-boxed the encoder/audio/webcam child waits;
+  bounded empty/dmabuf-only buffers instead of hanging; plugged foreign-memory and
+  EGL-display leaks on error paths; removed a stray `/tmp` debug write.
+
 ## [1.2.0] - 2026-08-30
 
 ### Changed

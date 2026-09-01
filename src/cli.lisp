@@ -9,7 +9,8 @@
 
 (defpackage #:takesy/cli
   (:use #:cl)
-  (:local-nicknames (#:rec #:takesy/record))
+  (:local-nicknames (#:rec #:takesy/record) (#:wc #:takesy/webcam)
+                    (#:wcp #:takesy/webcam-preview))
   (:export #:main #:run #:*version*))
 
 (in-package #:takesy/cli)
@@ -112,18 +113,28 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
   (list
    (clingon:make-option :string :description "recording dir"
                         :long-name "dir" :initial-value "/tmp/takesy-rec" :key :dir)
-   (clingon:make-option :integer :description "max seconds (safety cap)"
-                        :long-name "duration" :initial-value 30 :key :duration)
+   (clingon:make-option :integer :description "optional max seconds (safety cap); default none -- click Stop to finish"
+                        :long-name "duration" :key :duration)
    (clingon:make-option :integer :description "capture/output frames per second"
                         :long-name "fps" :initial-value 24 :key :fps)
    (clingon:make-option :string :description "record audio: system | mic | both | off"
                         :long-name "audio" :key :audio)
    (clingon:make-option :integer :description "count down N seconds before recording (0=off)"
-                        :long-name "countdown" :initial-value 3 :key :countdown)))
+                        :long-name "countdown" :initial-value 3 :key :countdown)
+   ;; --webcam doubles as a live-capture trigger: a /dev/video* node or "auto"
+   ;; records the camera during capture; any other path is a pre-recorded PiP clip
+   ;; consumed at render time (handled in render-options for the standalone render).
+   (clingon:make-option :string
+                        :description "webcam PiP: /dev/videoN or auto (live), or a video/image file"
+                        :long-name "webcam" :key :webcam)))
 
-(defun render-options ()
-  "Options that govern the direct + composite stages (record + render)."
-  (list
+(defun render-options (&key (webcam t))
+  "Options that govern the direct + composite stages (record + render). WEBCAM
+includes the --webcam option; pass NIL for the combined `record' command, where
+capture-options already carries --webcam (so it isn't declared twice)."
+  (remove
+   nil
+   (list
    (clingon:make-option :string :description "output file (.gif path -> animated GIF, no audio)"
                         :short-name #\o :long-name "output"
                         :initial-value "/tmp/takesy-record.mp4" :key :output)
@@ -149,13 +160,27 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
                         :long-name "cursor-size" :key :cursor-size)
    (clingon:make-option :boolean :description "click ripples + cursor press (default on)"
                         :long-name "ripples" :initial-value :true :key :ripples)
-   (clingon:make-option :string :description "composite a webcam video/image as a circle inset"
-                        :long-name "webcam" :key :webcam)
+   (when webcam
+     (clingon:make-option :string
+                          :description "webcam PiP: a video/image file (or /dev/videoN|auto for live)"
+                          :long-name "webcam" :key :webcam))
    (clingon:make-option :choice :description "webcam inset corner"
                         :long-name "webcam-pos" :items '("br" "bl" "tr" "tl")
                         :initial-value "br" :key :webcam-pos)
    (clingon:make-option :string :description "webcam diameter as output-height fraction (default 0.22)"
                         :long-name "webcam-size" :initial-value "0.22" :key :webcam-size)
+   (clingon:make-option :string :description "webcam corner radius, fraction of half-size: 1=circle, 0=square (default 1)"
+                        :long-name "webcam-corner" :initial-value "1.0" :key :webcam-corner)
+   (clingon:make-option :string :description "webcam border width, fraction of inset (default 0.012; 0=none)"
+                        :long-name "webcam-border" :initial-value "0.012" :key :webcam-border)
+   (clingon:make-option :string :description "webcam border colour: name or #RRGGBB (default white)"
+                        :long-name "webcam-border-color" :initial-value "white" :key :webcam-border-color)
+   (clingon:make-option :string :description "webcam framing zoom, >=1 (usually set in the auto preview)"
+                        :long-name "webcam-zoom" :initial-value "1.0" :key :webcam-zoom)
+   (clingon:make-option :string :description "webcam framing pan-x, source fraction -0.5..0.5"
+                        :long-name "webcam-pan-x" :initial-value "0.0" :key :webcam-pan-x)
+   (clingon:make-option :string :description "webcam framing pan-y, source fraction -0.5..0.5"
+                        :long-name "webcam-pan-y" :initial-value "0.0" :key :webcam-pan-y)
    (clingon:make-option :flag :description "cut idle stretches to speed up demos (drops audio)"
                         :long-name "trim-idle" :key :trim-idle)
    (clingon:make-option :string :description "idle gap to cut, seconds (default 1.2)"
@@ -167,7 +192,7 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
    (clingon:make-option :string :description "seconds before a click to aim the cursor (default 0.4)"
                         :long-name "cursor-anticipate" :initial-value "0.4" :key :cursor-anticipate)
    (clingon:make-option :string :description "write the per-frame camera path (zoom/pan) to CSV"
-                        :long-name "log-camera" :key :log-camera)))
+                        :long-name "log-camera" :key :log-camera))))
 
 ;;; ------------------------------------------------------------------
 ;;; Turning parsed options into RENDER-RECORDING keyword args.
@@ -187,9 +212,21 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
             :bg                (if (and bg-str (not bg-blur))
                                    (parse-color bg-str) '(0.11 0.12 0.15))
             :bg-image          (g :bg-image)
-            :webcam            (g :webcam)
+            ;; Only a FILE reaches render as --webcam; a live spec (/dev/videoN|auto)
+            ;; is captured during recording and render picks the clip up from the
+            ;; manifest, so don't hand render a device path (green-screen-asp).
+            :webcam            (let ((w (g :webcam)))
+                                 (unless (wc:live-spec-p w) w))
             :webcam-pos        (parse-webcam-pos (g :webcam-pos))
             :webcam-size       (%float (g :webcam-size) 0.22)
+            :webcam-corner     (%float (g :webcam-corner) 1.0)
+            :webcam-border     (%float (g :webcam-border) 0.012)
+            :webcam-border-color (parse-color (or (g :webcam-border-color) "white"))
+            ;; NIL when at default so a manifest's previewed framing wins on re-render;
+            ;; an explicit flag overrides it.
+            :webcam-zoom       (let ((z (%float (g :webcam-zoom) 1.0)))  (unless (= z 1.0) z))
+            :webcam-pan-x      (let ((p (%float (g :webcam-pan-x) 0.0))) (unless (= p 0.0) p))
+            :webcam-pan-y      (let ((p (%float (g :webcam-pan-y) 0.0))) (unless (= p 0.0) p))
             :ripples           (%truthy (g :ripples))
             :aspect            (parse-aspect (g :aspect))
             :region            (parse-region (g :region))
@@ -210,42 +247,72 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
 ;;; ------------------------------------------------------------------
 ;;; Command handlers.
 
+(defun %have-display-p ()
+  "T when a desktop session is present (so we can pop a browser). takesy needs one
+to capture the screen anyway; this just guards a truly headless invocation."
+  (or (uiop:getenv "WAYLAND_DISPLAY") (uiop:getenv "DISPLAY")))
+
+(defun %maybe-preview (live)
+  "Whenever LIVE names a live camera (and a desktop is present), open the framing
+preview to pick the camera + adjust zoom/pan -- always, since a webcam recording
+wants framing. Return (values device zoom pan-x pan-y): the user's choices, or LIVE
+with neutral framing when there's no display or the user cancels."
+  (if (and live (%have-display-p))
+      (let ((r (wcp:run-preview
+                :initial-device (unless (string-equal live "auto") live))))
+        (if r
+            (values (getf r :device) (getf r :zoom) (getf r :pan-x) (getf r :pan-y))
+            (values live 1.0 0.0 0.0)))
+      (values live 1.0 0.0 0.0)))
+
 (defun handle-record (cmd)
   "Full pipeline: capture then render in one shot (the default action)."
   (let* ((dur   (clingon:getopt cmd :duration))
          (fps   (clingon:getopt cmd :fps))
          (dir   (clingon:getopt cmd :dir))
          (audio (parse-audio (clingon:getopt cmd :audio)))
+         (webcam (clingon:getopt cmd :webcam))
+         (live  (and (wc:live-spec-p webcam) webcam))   ; /dev/videoN|auto -> live
          (ra    (%render-args cmd)))
-    (format t "takesy: recording up to ~Ds @ ~Dfps, up to ~Dp tall~@[ +audio(~(~A~))~] -> ~A~%"
-            dur fps (getf ra :max-height) audio (getf ra :out))
+    (format t "takesy: recording~@[ up to ~Ds~] @ ~Dfps, up to ~Dp tall~@[ +audio(~(~A~))~]~@[ +webcam(~A)~] -> ~A~%"
+            dur fps (getf ra :max-height) audio live (getf ra :out))
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
-    (let ((recording (rec:capture-recording :duration (float dur 1.0) :fps fps :dir dir
-                                            :audio audio
+    (multiple-value-bind (dev z px py) (%maybe-preview live)
+     (let ((recording (rec:capture-recording :duration (and dur (float dur 1.0)) :fps fps :dir dir
+                                            :audio audio :webcam dev
+                                            :webcam-zoom z :webcam-pan-x px :webcam-pan-y py
                                             :countdown (clingon:getopt cmd :countdown))))
       (multiple-value-bind (path n) (apply #'rec:render-recording recording ra)
         (format t "done: wrote ~A (~D frames)~%" path n)
         (format t "  re-render this capture with: takesy render ~A [--bg ... ]~%" dir)
-        path))))
+        path)))))
 
 (defun handle-capture (cmd)
   "Capture stage only: record to DIR for later (re-)rendering."
   (let* ((dur   (clingon:getopt cmd :duration))
          (fps   (clingon:getopt cmd :fps))
          (dir   (clingon:getopt cmd :dir))
-         (audio (parse-audio (clingon:getopt cmd :audio))))
-    (format t "takesy: capturing up to ~Ds @ ~Dfps~@[ +audio(~(~A~))~] -> ~A~%"
-            dur fps audio dir)
+         (audio (parse-audio (clingon:getopt cmd :audio)))
+         (webcam (clingon:getopt cmd :webcam))
+         (live  (and (wc:live-spec-p webcam) webcam)))
+    (when (and webcam (not live))
+      (format t "  [capture] note: --webcam ~S is a file, not a live device -- capture~%~
+                   only records live cameras (/dev/videoN or auto). Pass the file at~%~
+                   render time instead: takesy render ~A --webcam ~A~%" webcam dir webcam))
+    (format t "takesy: capturing~@[ up to ~Ds~] @ ~Dfps~@[ +audio(~(~A~))~]~@[ +webcam(~A)~] -> ~A~%"
+            dur fps audio live dir)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish.~%")
-    (let ((recording (rec:capture-recording :duration (float dur 1.0) :fps fps :dir dir
-                                            :audio audio
+    (multiple-value-bind (dev z px py) (%maybe-preview live)
+     (let ((recording (rec:capture-recording :duration (and dur (float dur 1.0)) :fps fps :dir dir
+                                            :audio audio :webcam dev
+                                            :webcam-zoom z :webcam-pan-x px :webcam-pan-y py
                                             :countdown (clingon:getopt cmd :countdown))))
       (format t "done: captured ~D frames to ~A~%" (length (getf recording :frames)) dir)
       (format t "  render it with: takesy render ~A [--output out.mp4 --bg ... ]~%" dir)
-      dir)))
+      dir))))
 
 (defun handle-render (cmd)
   "Direct + composite stages only: render a previously-captured DIR to an mp4."
@@ -275,7 +342,9 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
 (defun record-command ()
   (clingon:make-command
    :name "record" :description "Capture your screen, direct it, and write an mp4."
-   :options (append (capture-options) (render-options)) :handler #'handle-record))
+   ;; capture-options already declares --webcam (its live-capture trigger), so drop
+   ;; render-options' copy to avoid declaring the same option twice.
+   :options (append (capture-options) (render-options :webcam nil)) :handler #'handle-record))
 
 (defun top-level-command ()
   "The `takesy` command. With no sub-command it records (the default action)."
@@ -286,7 +355,7 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
 editorial auto-zoom camera. With no sub-command, takesy records your screen."
    :authors '("Anthony Green <green@moxielogic.com>")
    :license "MIT"
-   :options (append (capture-options) (render-options))
+   :options (append (capture-options) (render-options :webcam nil))
    :handler #'handle-record
    :sub-commands (list (capture-command) (render-command) (record-command))))
 

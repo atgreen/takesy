@@ -137,7 +137,11 @@ id /= 0 (valid cursor data)."
 (cffi:defcallback cb-state-changed :void
     ((data :pointer) (old :int) (state :int) (error :pointer))
   (declare (ignore data old))
+  ;; C-stack callback: firewall so a condition can't unwind into PipeWire
+  ;; (green-screen-zqb.3).
   (when *cap*
+   (handler-case
+    (progn
     (when (and (= state +pw-stream-state-error+) (not (cffi:null-pointer-p error)))
       (setf (capture-error *cap*) (cffi:foreign-string-to-lisp error)))
     (format t "  [pw] state -> ~A~@[ (~A)~]~%"
@@ -160,38 +164,44 @@ id /= 0 (valid cursor data)."
                   (= state +pw-stream-state-error+)))
          (format t "  [pw] share ended -> stopping recording~%")
          (setf (capture-done cap) t)
-         (when (capture-loop cap) (pw-main-loop-quit (capture-loop cap))))))))
+         (when (capture-loop cap) (pw-main-loop-quit (capture-loop cap)))))))
+    (serious-condition (e)
+      (ignore-errors
+       (format *error-output* "  [pw] state-changed error: ~A~%" e))))))
 
 (cffi:defcallback cb-param-changed :void
     ((data :pointer) (id :uint32) (param :pointer))
   (declare (ignore data))
+  ;; This runs on PipeWire's C stack: a Lisp condition must never unwind across
+  ;; the callback boundary (undefined behaviour), so firewall the whole body and
+  ;; record the failure for the driver to surface (green-screen-zqb.3).
   (when (and *cap* (= id +spa-param-format+) (not (cffi:null-pointer-p param)))
-    ;; Dump the real fixated format POD for offline parser diagnosis.
-    (let* ((total (+ 8 (u32@ param 0)))
-           (v (make-array total :element-type '(unsigned-byte 8))))
-      (cffi:with-pointer-to-vector-data (d v)
-        (cffi:foreign-funcall "memcpy" :pointer d :pointer param :size total :pointer))
-      (ignore-errors
-       (with-open-file (s "/tmp/gs-format-param.bin" :direction :output
-                                                     :element-type '(unsigned-byte 8)
-                                                     :if-exists :supersede)
-         (write-sequence v s))))
-    (multiple-value-bind (w h fmt) (parse-format param)
-      (setf (capture-width *cap*) w (capture-height *cap*) h (capture-format *cap*) fmt)
-      (let* ((stride (* w 4))
-             (size (* stride h))
-             (bufpod (octets->foreign (build-buffers-pod stride size)))
-             (curpod (octets->foreign (build-cursor-meta-pod)))
-             (arr (cffi:foreign-alloc :pointer :count 2)))
-        (setf (capture-stride *cap*) stride)
-        (setf (cffi:mem-aref arr :pointer 0) bufpod
-              (cffi:mem-aref arr :pointer 1) curpod)
-        (setf (capture-update-rc *cap*)
-              (pw-stream-update-params (capture-stream *cap*) arr 2))
-        (cffi:foreign-free arr)
-        (cffi:foreign-free bufpod)
-        (cffi:foreign-free curpod)
-        (format t "  [pw] negotiated ~Dx~D fmt=~D~%" w h fmt)))))
+    (handler-case
+        (multiple-value-bind (w h fmt) (parse-format param)
+          (setf (capture-width *cap*) w (capture-height *cap*) h (capture-format *cap*) fmt)
+          (let* ((stride (* w 4))
+                 (size (* stride h))
+                 (bufpod nil) (curpod nil) (arr nil))
+            (setf (capture-stride *cap*) stride)
+            ;; Allocate under unwind-protect so a signal mid-setup can't leak the
+            ;; foreign PODs (green-screen-zqb.5).
+            (unwind-protect
+                 (progn
+                   (setf bufpod (octets->foreign (build-buffers-pod stride size))
+                         curpod (octets->foreign (build-cursor-meta-pod))
+                         arr    (cffi:foreign-alloc :pointer :count 2))
+                   (setf (cffi:mem-aref arr :pointer 0) bufpod
+                         (cffi:mem-aref arr :pointer 1) curpod)
+                   (setf (capture-update-rc *cap*)
+                         (pw-stream-update-params (capture-stream *cap*) arr 2)))
+              (when arr    (cffi:foreign-free arr))
+              (when bufpod (cffi:foreign-free bufpod))
+              (when curpod (cffi:foreign-free curpod)))
+            (format t "  [pw] negotiated ~Dx~D fmt=~D~%" w h fmt)))
+      (serious-condition (e)
+        (setf (capture-error *cap*) (format nil "param-changed: ~A" e))
+        (ignore-errors
+         (format *error-output* "  [pw] param-changed error: ~A~%" e))))))
 
 (defun %frame->vector (dptr coff csize)
   "Copy CSIZE bytes at DPTR+COFF into a fresh (unsigned-byte 8) vector."
@@ -206,6 +216,38 @@ id /= 0 (valid cursor data)."
   (with-open-file (s path :direction :output :element-type '(unsigned-byte 8)
                           :if-exists :supersede)
     (write-sequence (%frame->vector dptr coff csize) s)))
+
+;;; ------------------------------------------------------------------
+;;; Give-up cap: if the compositor only ever hands us empty / dmabuf-only
+;;; buffers (no mapped pixels) we would otherwise spin forever -- capture-one-frame
+;;; has no deadline. Bail after this many empties *before the first real frame*
+;;; with a clear error instead of hanging (green-screen-zqb.6).
+(defconstant +max-empty-buffers+ 600)
+
+;;; Map a negotiated SPA video format to the ffmpeg rawvideo pixel format that
+;;; describes the same byte order. Both the streaming encoder and the still-frame
+;;; path feed ffmpeg raw bytes, so it must be told the *actual* layout or colours
+;;; swap (green-screen-zqb.1).
+(defun format->ffmpeg-pixfmt (fmt)
+  (cond ((= fmt +spa-video-format-bgrx+) "bgr0")
+        ((= fmt +spa-video-format-rgbx+) "rgb0")
+        ((= fmt +spa-video-format-bgra+) "bgra")
+        ((= fmt +spa-video-format-rgba+) "rgba")
+        ((= fmt +spa-video-format-xrgb+) "0rgb")
+        ((= fmt +spa-video-format-argb+) "argb")
+        (t "bgr0")))
+
+;;; The compositor uploads raw frames as a GL texture and only distinguishes the
+;;; two 32bpp byte orders it can name: :rgba (R-G-B-A/X) and :bgra (B-G-R-A/X).
+;;; The raw-file capture fallback stores frames in the *negotiated* format, so it
+;;; must tell the compositor which order they are, or colours swap on an RGB-order
+;;; source (green-screen-f5b). NIL / anything exotic (ARGB/XRGB, which a screencast
+;;; portal never negotiates) falls back to :bgra, the common Wayland order.
+(defun format->gl-source-format (fmt)
+  (if (and (integerp fmt)
+           (or (= fmt +spa-video-format-rgbx+) (= fmt +spa-video-format-rgba+)))
+      :rgba
+      :bgra))
 
 ;;; ------------------------------------------------------------------
 ;;; Streaming encoder: pipe raw BGRx frames to ffmpeg via a FIFO -> a near-
@@ -241,7 +283,8 @@ intermediate; store the pieces in CAP. Return T on success, NIL to fall back."
             (uiop:run-program (list "mkfifo" fifo))
             (let ((proc (uiop:launch-program
                          (list "ffmpeg" "-y" "-loglevel" "error"
-                               "-f" "rawvideo" "-pix_fmt" "bgra"
+                               "-f" "rawvideo"
+                               "-pix_fmt" (format->ffmpeg-pixfmt (capture-format cap))
                                "-s" (format nil "~Dx~D" w h)
                                "-r" (format nil "~D" fps) "-i" fifo
                                "-c:v" enc "-b:v" (format nil "~D" bitrate)
@@ -251,10 +294,16 @@ intermediate; store the pieces in CAP. Return T on success, NIL to fall back."
                   ;; opening the write end (of the existing FIFO -- hence
                   ;; :if-exists) unblocks ffmpeg's FIFO read open. Only commit the
                   ;; encoder fields once this succeeds, so a failure leaves nothing
-                  ;; dangling.
-                  (let ((stream (open fifo :direction :output
-                                           :element-type '(unsigned-byte 8)
-                                           :if-exists :append)))
+                  ;; dangling. Time-box the open: if ffmpeg never opens the read end
+                  ;; (bad args, missing lib) the FIFO open would block forever, so
+                  ;; treat a stall as failure and fall back to raw (green-screen-zqb.4).
+                  (let ((stream (handler-case
+                                    (sb-ext:with-timeout 10
+                                      (open fifo :direction :output
+                                                 :element-type '(unsigned-byte 8)
+                                                 :if-exists :append))
+                                  (sb-ext:timeout ()
+                                    (error "encoder FIFO open timed out (ffmpeg did not start?)")))))
                     (setf (capture-enc-proc cap) proc
                           (capture-enc-fifo cap) fifo
                           (capture-intermediate cap) out
@@ -275,15 +324,23 @@ intermediate; store the pieces in CAP. Return T on success, NIL to fall back."
     (ignore-errors (close (capture-enc-stream cap)))
     (setf (capture-enc-stream cap) nil))
   (when (capture-enc-proc cap)
-    (ignore-errors (uiop:wait-process (capture-enc-proc cap)))
+    ;; After EOF, ffmpeg only has to flush the trailer -- normally instant. Cap the
+    ;; wait so a wedged encoder can't hang teardown forever (green-screen-zqb.4).
+    (let ((proc (capture-enc-proc cap)))
+      (ignore-errors
+       (handler-case (sb-ext:with-timeout 30 (uiop:wait-process proc))
+         (sb-ext:timeout ()
+           (ignore-errors (uiop:terminate-process proc :urgent t))
+           (ignore-errors (uiop:wait-process proc))))))
     (setf (capture-enc-proc cap) nil))
   (when (capture-enc-fifo cap)
     (ignore-errors (delete-file (capture-enc-fifo cap)))
     (setf (capture-enc-fifo cap) nil)))
 
-(defun %record-frame (cap stream b spabuf dptr csize cstride coff)
+(defun %record-frame (cap spabuf dptr csize cstride coff)
   "Recording-mode buffer handler: save throttled frames + per-frame cursor until
-DURATION elapses from the first frame, then quit the loop. Always requeues."
+DURATION elapses from the first frame, then quit the loop. The caller (CB-PROCESS)
+owns requeuing the buffer, so this never touches it."
   (let ((now (get-internal-real-time)))
     ;; Start the clock on the first real frame so DURATION is wall-clock of
     ;; actual capture, not shortened by portal/PipeWire negotiation (am4.7).
@@ -306,30 +363,33 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
           (let* ((fbytes (max 1 csize))
                  (cap-frames (max 1 (floor (capture-record-budget cap) fbytes)))
                  (dur-units  (capture-record-duration cap))
-                 (spread-dt  (if (plusp dur-units) (floor dur-units cap-frames) 0)))
+                 ;; With no time cap, don't spread frames across a duration -- just
+                 ;; run at MAX-FPS until the disk-budget frame count is reached.
+                 (spread-dt  (if (and dur-units (plusp dur-units))
+                                 (floor dur-units cap-frames) 0)))
             (setf (capture-max-frames cap) cap-frames
                   (capture-record-min-dt cap)
                   (max (capture-record-min-dt cap) spread-dt))
             (format t "  [pw] no encoder -- disk budget: up to ~D full-res frames ~
-                       (~,1F fps over ~,0Fs)~%"
+                       (~,1F fps~@[ over ~,0Fs~])~%"
                     cap-frames
                     (/ internal-time-units-per-second
                        (float (max 1 (capture-record-min-dt cap)) 1.0))
-                    (/ dur-units internal-time-units-per-second 1.0)))))
+                    (when dur-units (/ dur-units internal-time-units-per-second 1.0))))))
     ;; Paused: drop the frame (no save, no deadline check -- paused time is
     ;; excluded; record-start is shifted forward on resume).
     (when (capture-paused cap)
-      (pw-stream-queue-buffer stream b)
       (return-from %record-frame))
-    (let ((deadline (+ (capture-record-start cap) (capture-record-duration cap))))
+    (let ((deadline (when (capture-record-duration cap)
+                      (+ (capture-record-start cap) (capture-record-duration cap)))))
      (cond
-      ;; safety caps: the max duration elapsed, or the frame backstop was hit
-      ;; (4K frames are ~37MB each). Normal stop is the user ending the share.
-      ((or (>= now deadline)
+      ;; safety caps: the optional max duration elapsed, or the disk-budget frame
+      ;; backstop was hit (4K frames are ~37MB each). Normal stop is the user ending
+      ;; the share (cb-state-changed). With no --duration, DEADLINE is NIL.
+      ((or (and deadline (>= now deadline))
            (and (plusp (capture-max-frames cap))
                 (>= (capture-n-saved cap) (capture-max-frames cap))))
        (setf (capture-done cap) t)
-       (pw-stream-queue-buffer stream b)
        (pw-main-loop-quit (capture-loop cap)))
       ((or (null (capture-record-last cap))
            (>= (- now (capture-record-last cap)) (capture-record-min-dt cap)))
@@ -348,65 +408,91 @@ DURATION elapses from the first frame, then quit the loop. Always requeues."
                  (capture-frames cap))
            (when cx (setf (capture-cursor-meta-seen cap) t))
            (incf (capture-n-saved cap))
-           (setf (capture-record-last cap) now)))
-       (pw-stream-queue-buffer stream b))
-      (t (pw-stream-queue-buffer stream b))))))   ; throttled: skip this frame
+           (setf (capture-record-last cap) now))))
+      (t nil)))))   ; throttled: skip this frame
+
+(defun %process-buffer (cap b)
+  "Handle one dequeued buffer B. Never requeues -- CB-PROCESS owns that, so the
+buffer is returned to the pool on every path including a signalled error."
+  (let* ((spabuf (ptr@ b +off/pw-buffer/buffer+))
+         (data0  (ptr@ spabuf +off/spa-buffer/datas+))
+         (chunk  (ptr@ data0 +off/spa-data/chunk+))
+         (dptr   (ptr@ data0 +off/spa-data/data+))
+         (csize   (u32@ chunk +off/spa-chunk/size+))
+         (cstride (i32@ chunk +off/spa-chunk/stride+))
+         (coff    (u32@ chunk +off/spa-chunk/offset+)))
+    (cond
+      ((and (capture-record-p cap)
+            (not (cffi:null-pointer-p dptr)) (> csize 0))
+       (%record-frame cap spabuf dptr csize cstride coff))
+      ((and (not (cffi:null-pointer-p dptr)) (> csize 0))
+       (multiple-value-bind (cx cy present id) (read-cursor spabuf)
+         (let ((nm (u32@ spabuf +off/spa-buffer/n-metas+))
+               (mp (ptr@ spabuf +off/spa-buffer/metas+)))
+           (setf (capture-metas-seen cap) (max (capture-metas-seen cap) nm)
+                 (capture-meta-types cap)
+                 (loop for i below nm
+                       collect (u32@ (ptr+ mp (* i +sz/spa-meta+))
+                                     +off/spa-meta/type+))))
+         (when present
+           (setf (capture-cursor-meta-seen cap) t (capture-last-cursor-id cap) id))
+         (cond
+           ;; Finish once we have the cursor, or the budget is spent.
+           ((or cx (<= (capture-frames-left cap) 0))
+            (when (> cstride 0)   ; chunk geometry is ground truth (32bpp)
+              (setf (capture-stride cap) cstride
+                    (capture-width cap)  (floor cstride 4)
+                    (capture-height cap) (floor csize cstride)))
+            (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
+              (cffi:with-pointer-to-vector-data (dst vec)
+                (cffi:foreign-funcall "memcpy" :pointer dst
+                                      :pointer (ptr+ dptr coff) :size csize :pointer))
+              (with-open-file (s (capture-raw-path cap) :direction :output
+                                                        :element-type '(unsigned-byte 8)
+                                                        :if-exists :supersede)
+                (write-sequence vec s)))
+            (setf (capture-cursor-x cap) cx (capture-cursor-y cap) cy
+                  (capture-done cap) t)
+            (pw-main-loop-quit (capture-loop cap)))
+           ;; Got pixels but no cursor metadata yet -- wait for more frames.
+           (t
+            (decf (capture-frames-left cap))))))
+      (t
+       ;; screencast often emits a few empty buffers first; skip them. But if we
+       ;; ONLY ever get empty / dmabuf-only buffers (no mapped pixels), the single-
+       ;; frame path has no deadline and record mode's deadline lives in
+       ;; %record-frame (never reached), so bound it: give up with an error once no
+       ;; real frame has arrived after +MAX-EMPTY-BUFFERS+ (green-screen-zqb.6).
+       (incf (capture-n-empty cap))
+       (when (and (zerop (capture-n-saved cap))
+                  (>= (capture-n-empty cap) +max-empty-buffers+))
+         (setf (capture-error cap)
+               (format nil "no usable frame after ~D empty buffers (dmabuf-only source?)"
+                       (capture-n-empty cap))
+               (capture-done cap) t)
+         (pw-main-loop-quit (capture-loop cap)))))))
 
 (cffi:defcallback cb-process :void ((data :pointer))
   (declare (ignore data))
-  (let* ((cap *cap*)
-         (stream (capture-stream cap))
-         (b (pw-stream-dequeue-buffer stream)))
-    (unless (cffi:null-pointer-p b)
-      (let* ((spabuf (ptr@ b +off/pw-buffer/buffer+))
-             (data0  (ptr@ spabuf +off/spa-buffer/datas+))
-             (chunk  (ptr@ data0 +off/spa-data/chunk+))
-             (dptr   (ptr@ data0 +off/spa-data/data+))
-             (csize   (u32@ chunk +off/spa-chunk/size+))
-             (cstride (i32@ chunk +off/spa-chunk/stride+))
-             (coff    (u32@ chunk +off/spa-chunk/offset+)))
-        (cond
-          ((and (capture-record-p cap)
-                (not (cffi:null-pointer-p dptr)) (> csize 0))
-           (%record-frame cap stream b spabuf dptr csize cstride coff))
-          ((and (not (cffi:null-pointer-p dptr)) (> csize 0))
-           (multiple-value-bind (cx cy present id) (read-cursor spabuf)
-             (let ((nm (u32@ spabuf +off/spa-buffer/n-metas+))
-                   (mp (ptr@ spabuf +off/spa-buffer/metas+)))
-               (setf (capture-metas-seen cap) (max (capture-metas-seen cap) nm)
-                     (capture-meta-types cap)
-                     (loop for i below nm
-                           collect (u32@ (ptr+ mp (* i +sz/spa-meta+))
-                                         +off/spa-meta/type+))))
-             (when present
-               (setf (capture-cursor-meta-seen cap) t (capture-last-cursor-id cap) id))
-             (cond
-               ;; Finish once we have the cursor, or the budget is spent.
-               ((or cx (<= (capture-frames-left cap) 0))
-                (when (> cstride 0)   ; chunk geometry is ground truth (32bpp)
-                  (setf (capture-stride cap) cstride
-                        (capture-width cap)  (floor cstride 4)
-                        (capture-height cap) (floor csize cstride)))
-                (let ((vec (make-array csize :element-type '(unsigned-byte 8))))
-                  (cffi:with-pointer-to-vector-data (dst vec)
-                    (cffi:foreign-funcall "memcpy" :pointer dst
-                                          :pointer (ptr+ dptr coff) :size csize :pointer))
-                  (with-open-file (s (capture-raw-path cap) :direction :output
-                                                            :element-type '(unsigned-byte 8)
-                                                            :if-exists :supersede)
-                    (write-sequence vec s)))
-                (setf (capture-cursor-x cap) cx (capture-cursor-y cap) cy
-                      (capture-done cap) t)
-                (pw-stream-queue-buffer stream b)
-                (pw-main-loop-quit (capture-loop cap)))
-               ;; Got pixels but no cursor metadata yet -- wait for more frames.
-               (t
-                (decf (capture-frames-left cap))
-                (pw-stream-queue-buffer stream b)))))
-          (t
-           ;; screencast often emits a few empty buffers first; skip them.
-           (incf (capture-n-empty cap))
-           (pw-stream-queue-buffer stream b)))))))
+  ;; Runs on PipeWire's C stack. Dequeue here, hand the buffer to %PROCESS-BUFFER
+  ;; inside a firewall so no Lisp condition unwinds across the callback boundary,
+  ;; and requeue in the cleanup so the buffer always returns to the pool exactly
+  ;; once -- even on error (green-screen-zqb.3).
+  (let ((cap *cap*))
+    (when cap
+      (let* ((stream (capture-stream cap))
+             (b (pw-stream-dequeue-buffer stream)))
+        (unless (cffi:null-pointer-p b)
+          (unwind-protect
+               (handler-case (%process-buffer cap b)
+                 (serious-condition (e)
+                   (setf (capture-error cap) (format nil "process: ~A" e))
+                   (ignore-errors
+                    (format *error-output* "  [pw] process error: ~A~%" e))
+                   ;; a broken stream won't fix itself -- stop rather than spin
+                   (setf (capture-done cap) t)
+                   (ignore-errors (pw-main-loop-quit (capture-loop cap)))))
+            (ignore-errors (pw-stream-queue-buffer stream b))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Events struct assembly.
@@ -489,12 +575,14 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
            (lines (remove "" (uiop:split-string out :separator '(#\Newline)) :test #'string=)))
       (parse-integer (string-trim " " (car (last lines))) :junk-allowed t))))
 
-(defun record-frames (fd node-id &key (duration 30.0) (max-fps 30)
+(defun record-frames (fd node-id &key (duration nil) (max-fps 30)
                                       (disk-budget nil)
                                       (audio nil)
                                       (dir "/tmp/takesy-rec"))
   "Record from NODE-ID into DIR until the user ends the share (stream drops after
-streaming -- cb-state-changed quits the loop) or DURATION seconds elapse. Frames
+streaming -- cb-state-changed quits the loop) or, when DURATION is non-NIL, that
+many seconds elapse as a safety cap (NIL = no time cap; the disk budget still bounds
+raw-fallback captures). Frames
 are full-res BGRx (~37MB each at 4K), so the number kept is bounded by DISK-BUDGET
 bytes and spread across the whole DURATION (the effective rate drops below MAX-FPS
 when needed) -- so a busy screen fills the clip, not the disk in a few seconds.
@@ -518,7 +606,8 @@ Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
                               ;; clock + frame budget are finalised on the first
                               ;; frame in %record-frame (size known then)
                               :record-duration
-                              (round (* duration internal-time-units-per-second))
+                              (when duration
+                                (round (* duration internal-time-units-per-second)))
                               :record-budget budget
                               :record-min-dt
                               (round (/ internal-time-units-per-second (max 1 max-fps)))))
@@ -553,15 +642,6 @@ Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
   "Read the manifest written by RECORD-FRAMES back into a recording plist."
   (with-open-file (s (format nil "~A/manifest.sexp" (string-right-trim "/" dir)))
     (with-standard-io-syntax (read s))))
-
-(defun format->ffmpeg-pixfmt (fmt)
-  (cond ((= fmt +spa-video-format-bgrx+) "bgr0")
-        ((= fmt +spa-video-format-rgbx+) "rgb0")
-        ((= fmt +spa-video-format-bgra+) "bgra")
-        ((= fmt +spa-video-format-rgba+) "rgba")
-        ((= fmt +spa-video-format-xrgb+) "0rgb")
-        ((= fmt +spa-video-format-argb+) "argb")
-        (t "bgr0")))
 
 (defun capture-frame-to-png (fd node-id png-path)
   "Capture one frame from NODE-ID (via portal FD) and write PNG-PATH.
