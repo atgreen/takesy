@@ -4,6 +4,14 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.8] - 2026-09-01
+
+### Added
+
+- **`--camera-smoothing S`** — expose the camera's hand-tremor smoothing (seconds;
+  `0` = off, default `0.15`) as a CLI option, alongside the existing cursor-easing
+  flags.
+
 ## [1.3.7] - 2026-09-01
 
 ### Changed

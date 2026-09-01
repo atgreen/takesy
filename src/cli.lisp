@@ -15,7 +15,7 @@
 
 (in-package #:takesy/cli)
 
-(defparameter *version* "1.3.7"
+(defparameter *version* "1.3.8"
   "takesy version string, surfaced via `takesy --version`.")
 
 ;;; ------------------------------------------------------------------
@@ -191,6 +191,8 @@ capture-options already carries --webcam (so it isn't declared twice)."
                         :long-name "cursor-omega-fast" :initial-value "60.0" :key :cursor-omega-fast)
    (clingon:make-option :string :description "seconds before a click to aim the cursor (default 0.15)"
                         :long-name "cursor-anticipate" :initial-value "0.15" :key :cursor-anticipate)
+   (clingon:make-option :string :description "smooth hand tremor out of the auto-zoom camera, seconds (default 0.15; 0=off)"
+                        :long-name "camera-smoothing" :initial-value "0.15" :key :camera-smoothing)
    (clingon:make-option :string :description "write the per-frame camera path (zoom/pan) to CSV"
                         :long-name "log-camera" :key :log-camera))))
 
@@ -241,6 +243,7 @@ capture-options already carries --webcam (so it isn't declared twice)."
             :cursor-size       (let ((s (g :cursor-size))) (when s (%float s 0.06)))
             :cursor-omega-fast (%float (g :cursor-omega-fast) 60.0)
             :cursor-anticipate (%float (g :cursor-anticipate) 0.15)
+            :camera-smoothing  (%float (g :camera-smoothing) 0.15)
             :camera-log        (g :log-camera)
             :out               (g :output)))))
 

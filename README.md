@@ -160,12 +160,13 @@ knobs to dial; the direction is automatic. `--log-camera PATH` writes the
 per-frame camera path (zoom/pan) to CSV and prints a motion summary if you want
 to inspect it.
 
-Cursor-overlay feel is still tunable:
+Cursor feel and how much the camera reacts to the pointer are tunable:
 
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher tracks the real pointer more tightly (less lag) | `60.0` |
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.15` |
+| `--camera-smoothing S` | smooth hand tremor out of the auto-zoom camera, seconds (`0` = off) | `0.15` |
 
 ## How it works
 

@@ -722,6 +722,7 @@ recording plist."
                                   (webcam-zoom nil) (webcam-pan-x nil) (webcam-pan-y nil)
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
+                                  (camera-smoothing dir:*camera-cursor-tau*)
                                   (camera-log nil)
                                   (out "/tmp/takesy-record.mp4"))
   "Direct + composite stages: direct REC via the editorial camera and render its
@@ -736,6 +737,7 @@ function of REC -- no capture -- so it can be re-run against one capture with
 different config. Return (values out n-frames)."
   (let ((dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
+        (dir:*camera-cursor-tau* camera-smoothing)
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
         (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image))))
         ;; Webcam PiP source: an explicit clip/file wins; otherwise fall back to a
@@ -830,6 +832,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (audio nil)
                            (cursor-omega-fast dir:*cursor-omega-fast*)
                            (cursor-anticipate dir:*cursor-anticipate*)
+                           (camera-smoothing dir:*camera-cursor-tau*)
                            (camera-log nil)
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
   "Full `takesy record`: CAPTURE-RECORDING then RENDER-RECORDING in one shot --
@@ -856,5 +859,6 @@ Return (values out n-frames)."
                     :webcam-zoom webcam-zoom :webcam-pan-x webcam-pan-x :webcam-pan-y webcam-pan-y
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
+                          :camera-smoothing camera-smoothing
                           :camera-log camera-log
                           :out out)))
