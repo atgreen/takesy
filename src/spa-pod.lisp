@@ -152,12 +152,12 @@ common 32-bit packed formats over a wide size/framerate range."
                     (pod-choice-range-rect buf 1920 1080 1 1 8192 8192)))
         (pod-prop buf +spa-format-video-framerate+
                   (lambda ()
-                    ;; Ask for a STEADY framerate (positive floor) rather than the
-                    ;; old min=0, which let the compositor drop to 0fps when the
-                    ;; screen was static -- starving the cursor metadata (that rides
-                    ;; on frames) and leaving gaps where the pointer can't be tracked
-                    ;; (green-screen: pointer "way off" during static stretches).
-                    (pod-choice-range-fraction buf 30 1 25 1 60 1)))
+                    ;; Must allow min=0: some compositors only advertise a variable
+                    ;; (down-to-0) framerate for screencast and reject a positive
+                    ;; floor with "no more input formats". Cursor gaps during static
+                    ;; stretches are handled at render instead (libinput fusion +
+                    ;; gap hold), not by forcing delivery here.
+                    (pod-choice-range-fraction buf 60 1 0 1 1000 1)))
         (set-u32 buf size-pos (- (fill-pointer buf) body-start))))
     buf))
 
