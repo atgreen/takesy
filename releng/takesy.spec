@@ -26,6 +26,7 @@ BuildRequires:  libfixposix-devel
 # runtime libfixposix package only provides libfixposix.so.3), so require -devel.
 Requires:       /usr/bin/ffmpeg
 Requires:       libfixposix-devel
+Requires:       libinput
 Requires:       pipewire-libs
 Requires:       mesa-libEGL
 Requires:       mesa-libGL

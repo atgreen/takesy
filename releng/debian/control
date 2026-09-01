@@ -19,6 +19,7 @@ Depends: ${shlibs:Depends},
          ${misc:Depends},
          ffmpeg,
          libfixposix-dev,
+         libinput10,
          libpipewire-0.3-0,
          libegl1,
          libgl1
