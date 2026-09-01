@@ -18,7 +18,7 @@ Architecture: amd64
 Depends: ${shlibs:Depends},
          ${misc:Depends},
          ffmpeg,
-         libfixposix4 | libfixposix3,
+         libfixposix-dev,
          libpipewire-0.3-0,
          libegl1,
          libgl1

@@ -22,8 +22,10 @@ BuildRequires:  libfixposix-devel
 
 # ffmpeg does the encoding (subprocess); libfixposix, PipeWire and EGL/GL are
 # dlopen'd by the binary at runtime, so they can't be auto-detected -- list them.
+# iolib dlopens the UNVERSIONED "libfixposix.so", which ships in -devel (the
+# runtime libfixposix package only provides libfixposix.so.3), so require -devel.
 Requires:       /usr/bin/ffmpeg
-Requires:       libfixposix
+Requires:       libfixposix-devel
 Requires:       pipewire-libs
 Requires:       mesa-libEGL
 Requires:       mesa-libGL

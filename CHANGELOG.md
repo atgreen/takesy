@@ -4,6 +4,16 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-09-01
+
+### Fixed
+
+- **Packages now install a working libfixposix.** iolib dlopens the *unversioned*
+  `libfixposix.so`, which ships in the `-devel` / `-dev` package (the runtime
+  package only provides the versioned SONAME). The RPM now requires
+  `libfixposix-devel` and the DEB `libfixposix-dev`, fixing
+  `Error opening shared object "libfixposix.so"` on a clean install.
+
 ## [1.3.0] - 2026-09-01
 
 ### Changed
