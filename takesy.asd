@@ -61,6 +61,13 @@
   :components ((:module "src"
                 :components ((:file "evdev")))))
 
+(asdf:defsystem "takesy/libinput"
+  :description "Continuous pointer-motion capture via libinput (fuse with PipeWire cursor)."
+  :depends-on ("cffi" "sb-posix")
+  :serial t
+  :components ((:module "src"
+                :components ((:file "libinput")))))
+
 (asdf:defsystem "takesy/audio"
   :description "Opt-in audio capture: parallel ffmpeg PulseAudio recorder -> wav."
   :serial t
@@ -83,7 +90,7 @@
 (asdf:defsystem "takesy/record"
   :description "Record orchestration: portal capture -> Director -> compositor -> mp4."
   :depends-on ("takesy/portal" "takesy/pipewire" "takesy/director" "takesy/compositor"
-               "takesy/audio" "takesy/webcam" "takesy/evdev")
+               "takesy/audio" "takesy/webcam" "takesy/evdev" "takesy/libinput")
   :serial t
   :components ((:module "src"
                 :components ((:file "record")))))

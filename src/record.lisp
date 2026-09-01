@@ -12,7 +12,8 @@
   (:local-nicknames (#:portal #:takesy/portal) (#:pw #:takesy/pipewire)
                     (#:dir #:takesy/director) (#:comp #:takesy/compositor)
                     (#:kf #:takesy/keyframe)
-                    (#:evdev #:takesy/evdev) (#:wc #:takesy/webcam))
+                    (#:evdev #:takesy/evdev) (#:wc #:takesy/webcam)
+                    (#:li #:takesy/libinput))
   (:export #:recording->session #:compute-damage #:compute-content-bbox
            #:compose-recording #:record-to-mp4 #:load-image-rgba
            #:capture-recording #:render-recording #:render-recording-dir))
@@ -353,22 +354,64 @@ outside the crop."
     (loop for e in edges for u = (/ (- e c0) d)
           when (<= 0.0 u 1.0) collect u)))
 
+(defun %fuse-cursor (anchors motion &key (max-gap 0.12))
+  "Fuse PipeWire cursor ANCHORS -- (time x y) full-frame px, absolute but gappy --
+with libinput MOTION -- (time dx dy) continuous relative -- into a dense (time x y)
+track. Within a gap longer than MAX-GAP, distribute the anchor-to-anchor
+displacement along the motion PROFILE (so the pointer moves when it actually moved
+and lands on both anchors -- acceleration cancels out because we scale to hit the
+endpoints); short gaps and axes with no motion fall back to a straight line. No
+motion track -> ANCHORS unchanged."
+  (if (or (null motion) (< (length anchors) 2))
+      anchors
+      (let ((mv (sort (copy-list motion) #'< :key #'first)))
+        (loop for (a b) on anchors
+              append
+              (cons a
+                    (when (and b (> (- (first b) (first a)) max-gap))
+                      (destructuring-bind (ta xa ya) a
+                        (destructuring-bind (tb xb yb) b
+                          (let ((cdx 0.0) (cdy 0.0) (segs '()))
+                            (dolist (m mv)
+                              (when (< ta (first m) tb)
+                                (incf cdx (second m)) (incf cdy (third m))
+                                (push (list (first m) cdx cdy) segs)))
+                            (setf segs (nreverse segs))
+                            (let ((tdx cdx) (tdy cdy) (span (- tb ta)))
+                              (when (and segs (or (> (abs tdx) 1e-6) (> (abs tdy) 1e-6)))
+                                (mapcar
+                                 (lambda (s)
+                                   (destructuring-bind (tm pdx pdy) s
+                                     (let ((u (/ (- tm ta) span)))
+                                       (list tm
+                                             (if (> (abs tdx) 1e-6) (+ xa (* pdx (/ (- xb xa) tdx)))
+                                                 (+ xa (* (- xb xa) u)))
+                                             (if (> (abs tdy) 1e-6) (+ ya (* pdy (/ (- yb ya) tdy)))
+                                                 (+ ya (* (- yb ya) u)))))))
+                                 segs))))))))))))
+
 (defun recording->session (rec &optional (crop '(0.0 0.0 1.0 1.0)))
   "Build a Director SESSION from a capture recording plist. CROP (x0 y0 x1 y1 in
 source UV) reframes the session onto just the content region: the session
 dimensions become the crop's pixel size and cursor positions are made relative to
-the crop origin, so the Director works in cropped space."
+the crop origin, so the Director works in cropped space. When a libinput motion
+track is present, it's fused with the PipeWire cursor so the pointer stays accurate
+through static-screen gaps."
   (destructuring-bind (cx0 cy0 cx1 cy1) crop
     (let* ((fw (getf rec :width)) (fh (getf rec :height))
            (ox (* cx0 fw)) (oy (* cy0 fh))
            (cw (max 1 (round (* (- cx1 cx0) fw))))
            (ch (max 1 (round (* (- cy1 cy0) fh))))
-           (cursor (loop for f in (getf rec :frames)
-                         when (getf f :cursor-x)
-                           collect (dir:make-cursor-sample
-                                    :time (float (getf f :time) 1.0)
-                                    :x (- (float (getf f :cursor-x) 1.0) ox)
-                                    :y (- (float (getf f :cursor-y) 1.0) oy)))))
+           (anchors (loop for f in (getf rec :frames)
+                          when (getf f :cursor-x)
+                            collect (list (float (getf f :time) 1.0)
+                                          (float (getf f :cursor-x) 1.0)
+                                          (float (getf f :cursor-y) 1.0))))
+           (cursor (mapcar (lambda (s)
+                             (dir:make-cursor-sample :time (first s)
+                                                     :x (- (second s) ox)
+                                                     :y (- (third s) oy)))
+                           (%fuse-cursor anchors (getf rec :pointer-motion)))))
       (dir:make-session :width cw :height ch :cursor cursor :events '()
                         ;; click times (positioned later via the cursor track); the
                         ;; strongest attention evidence for the shot planner.
@@ -611,6 +654,11 @@ recording plist."
            ;; start so click times align with the frame timeline.
            (join (when capture-clicks
                    (ignore-errors (evdev:capture-click-times (lambda () done)))))
+           ;; Continuous pointer motion via libinput -- fused with the (gappy)
+           ;; PipeWire cursor at render so the pointer tracks even while the screen
+           ;; is static. Best-effort; times are GET-INTERNAL-REAL-TIME (frame clock).
+           (motion-join (when capture-clicks
+                          (ignore-errors (li:capture-pointer-motion (lambda () done)))))
            ;; Live webcam (green-screen-asp): a parallel v4l2 recorder over the same
            ;; window, started here so it aligns with frame capture (past the
            ;; countdown), best-effort like audio.
@@ -619,6 +667,20 @@ recording plist."
                                    :dir dir :audio audio))
            (dirty nil))
       (setf done t)
+      ;; Store the pointer-motion track (times made relative to the first frame so
+      ;; the render can fuse it with the PipeWire cursor anchors).
+      (when motion-join
+        (let ((motion (ignore-errors (funcall motion-join)))
+              (t0 (getf rec :record-start))
+              (units (float (or (getf rec :time-units) 1000000) 1.0d0)))
+          (when (and motion t0)
+            (setf (getf rec :pointer-motion)      ; (time-seconds dx dy), frame clock
+                  (mapcar (lambda (e) (list (float (/ (- (first e) t0) units) 1.0)
+                                            (second e) (third e)))
+                          motion)
+                  dirty t)
+            (format t "  [capture] pointer motion: ~D samples (fused for accurate cursor)~%"
+                    (length motion)))))
       ;; Finalize the webcam clip and store its path so render composites it as PiP.
       (when wc-handle
         (let ((path (ignore-errors (wc:stop-webcam wc-handle))))

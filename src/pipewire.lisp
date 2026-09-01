@@ -625,6 +625,10 @@ Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
                     :stride (capture-stride cap) :format (capture-format cap)
                     :fps max-fps :dir (capture-record-dir cap)
                     :cursor-meta (capture-cursor-meta-seen cap)
+                    ;; first-frame clock (internal-time units) -- lets the render
+                    ;; align a parallel pointer-motion track to the frame timeline.
+                    :record-start (capture-record-start cap)
+                    :time-units internal-time-units-per-second
                     :intermediate (capture-intermediate cap)  ; nil if raw fallback
                     ;; stop-audio finalises the wav and validates it has data;
                     ;; NIL when audio was off or produced nothing.

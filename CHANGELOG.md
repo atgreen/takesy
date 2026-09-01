@@ -8,13 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Pointer no longer drifts to a wrong spot during static-screen stretches.** The
-  screencast delivers cursor updates only when the screen changes, so moving the
-  mouse over a static window (with the HW cursor hidden) can leave a gap with no
-  cursor samples; the render was interpolating across it and drawing the pointer at
-  a fictional in-between position ("way off" on some machines). It now holds the
-  last real position across a gap (> `*cursor-gap-hold*`, 0.2s) and snaps when
-  samples resume, so the drawn pointer is always somewhere it actually was.
+- **Accurate pointer even when the screen is static** (the "pointer way off on some
+  machines" report). Root cause: the screencast delivers cursor position only on
+  screen change, so moving the mouse over a static window (HW cursor hidden) left
+  gaps with no cursor samples, and the render interpolated a fictional path across
+  them. Three-part fix:
+  - **libinput motion fusion** — takesy now reads *continuous* relative pointer
+    motion from libinput (the kernel input layer, below Wayland's restrictions) and
+    fuses it with the accurate-but-gappy PipeWire cursor: PipeWire supplies exact
+    anchor positions, libinput supplies the real path between them. The drawn cursor
+    follows the actual motion (holding when still, moving when it moved) and lands on
+    the true positions. Best-effort; needs the `input` group like click capture.
+  - **Steady capture framerate** — we now ask the compositor for a positive minimum
+    framerate instead of `0`, so cursor metadata keeps arriving during static
+    stretches.
+  - **Gap hold fallback** — with no motion track available, the cursor holds its last
+    real position across a gap (`*cursor-gap-hold*`) rather than drawing a fictional
+    midpoint.
 
 ## [1.3.4] - 2026-09-01
 
