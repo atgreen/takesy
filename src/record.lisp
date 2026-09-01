@@ -485,7 +485,10 @@ without an over-large file."
              (cursor-fn (when cursor-session   ; cursor coords are in cropped px
                           (lambda (i)
                             (multiple-value-bind (x y)
-                                (dir:cursor-at cursor-session (funcall src-time i))
+                                ;; hold across capture gaps rather than drawing the
+                                ;; pointer at a fictional midpoint (green-screen).
+                                (dir:cursor-at cursor-session (funcall src-time i)
+                                               :max-gap dir:*cursor-gap-hold*)
                               (cons (/ x (float cw 1.0)) (/ y (float ch 1.0))))))))
         (format t "  [record] compositing ~D src frames -> ~D output frames ~
                    (~,1Fs @ ~Dfps) crop ~,2Fx~,2F of frame -> ~Dx~D~@[ +cursor~]~%"

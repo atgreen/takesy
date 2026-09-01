@@ -4,6 +4,18 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Pointer no longer drifts to a wrong spot during static-screen stretches.** The
+  screencast delivers cursor updates only when the screen changes, so moving the
+  mouse over a static window (with the HW cursor hidden) can leave a gap with no
+  cursor samples; the render was interpolating across it and drawing the pointer at
+  a fictional in-between position ("way off" on some machines). It now holds the
+  last real position across a gap (> `*cursor-gap-hold*`, 0.2s) and snaps when
+  samples resume, so the drawn pointer is always somewhere it actually was.
+
 ## [1.3.4] - 2026-09-01
 
 ### Added

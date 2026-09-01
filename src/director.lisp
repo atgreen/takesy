@@ -26,7 +26,7 @@
            #:session-duration #:*zoom-fit-margin*
            #:px->uv #:cursor-at #:make-synthetic-session #:validate-session
            #:*cursor-omega-slow* #:*cursor-omega-fast* #:*cursor-speed-ref*
-           #:*cursor-anticipate* #:spring-step #:ease-cursor
+           #:*cursor-anticipate* #:*cursor-gap-hold* #:spring-step #:ease-cursor
            #:activity-segment #:make-activity-segment #:activity-segment-p
            #:activity-segment-t-start #:activity-segment-t-end
            #:activity-segment-focus-x #:activity-segment-focus-y
@@ -73,9 +73,14 @@
   (flet ((clamp01 (v) (max 0.0 (min 1.0 (float v 1.0)))))
     (values (clamp01 (/ x width)) (clamp01 (/ y height)))))
 
-(defun cursor-at (session time)
+(defun cursor-at (session time &key max-gap)
   "Piecewise-linear cursor position at TIME. Return (values x y) in screen px;
-clamps to the track endpoints outside its span."
+clamps to the track endpoints outside its span. When MAX-GAP is given and the two
+bracketing samples are more than MAX-GAP seconds apart, HOLD the earlier sample
+across the gap instead of interpolating: a gap means the capture got no cursor
+updates (the screen was static while the pointer moved), so the true path is
+unknown -- holding the last real position, then snapping when the next sample
+arrives, avoids drawing the pointer at a fictional in-between spot."
   (let ((c (session-cursor session)))
     (cond
       ((null c) (values 0.0 0.0))
@@ -89,6 +94,8 @@ clamps to the track endpoints outside its span."
                  do (let* ((span (- (cursor-sample-time b) (cursor-sample-time a)))
                            (u (if (zerop span) 0.0
                                   (/ (- time (cursor-sample-time a)) span))))
+                      (when (and max-gap (> span max-gap))
+                        (return (values (cursor-sample-x a) (cursor-sample-y a))))
                       (return (values (+ (cursor-sample-x a)
                                          (* (- (cursor-sample-x b) (cursor-sample-x a)) u))
                                       (+ (cursor-sample-y a)
@@ -118,6 +125,11 @@ reads as the pointer being in the wrong place -- especially once zoomed in).")
 (defparameter *cursor-anticipate* 0.15
   "Seconds before a rest/click target to start aiming the cursor straight at it.
 Small so the drawn cursor doesn't lead the real one noticeably.")
+(defparameter *cursor-gap-hold* 0.2
+  "Cursor-track gap (s) beyond which the drawn cursor HOLDS its last real position
+instead of interpolating. On-change screencast delivery gives no cursor updates
+while the screen is static, so a gap's midpoint is a fictional position -- holding
+avoids drawing the pointer somewhere it never was.")
 
 (defun spring-step (p v x omega dt)
   "Advance a critically-damped spring one step: position P, velocity V chasing
