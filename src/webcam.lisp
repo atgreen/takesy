@@ -15,7 +15,8 @@
 (defpackage #:takesy/webcam
   (:use #:cl)
   (:export #:start-webcam #:stop-webcam #:webcam-handle #:webcam-handle-path
-           #:list-video-devices #:list-cameras #:resolve-device #:live-spec-p))
+           #:list-video-devices #:list-cameras #:resolve-device #:live-spec-p
+           #:supports-mjpeg-p #:v4l2-input-args))
 
 (in-package #:takesy/webcam)
 
@@ -65,6 +66,27 @@ Skips metadata companion nodes (e.g. the /dev/video1 that shadows /dev/video0)."
                   :ignore-error-status t :output nil :error-output nil))))
      (sb-ext:timeout () nil))))
 
+(defun supports-mjpeg-p (dev)
+  "T when DEV advertises an MJPEG (compressed) v4l2 format. Capturing MJPEG lets a
+USB webcam deliver full framerate, where the raw format is bandwidth-limited (and
+often stuck at a low resolution). Bounded probe; NIL on error/timeout."
+  (ignore-errors
+   (handler-case
+       (sb-ext:with-timeout 4
+         (let ((out (with-output-to-string (s)
+                      (uiop:run-program
+                       (list "ffmpeg" "-hide_banner" "-f" "v4l2"
+                             "-list_formats" "all" "-i" dev)
+                       :output nil :error-output s :ignore-error-status t))))
+           (and (search "mjpeg" (string-downcase out)) t)))
+     (sb-ext:timeout () nil))))
+
+(defun v4l2-input-args (dev)
+  "ffmpeg input options for capturing DEV: prefer MJPEG (full framerate on USB
+cameras) when the device supports it, else the driver default (raw). Goes before
+the -i on an ffmpeg v4l2 command line."
+  (when (supports-mjpeg-p dev) (list "-input_format" "mjpeg")))
+
 (defun resolve-device (spec)
   "Resolve a live SPEC to a concrete device path, or NIL. \"auto\" probes
 /dev/video* for the first real capture node; an explicit /dev/videoN is trusted
@@ -88,18 +110,19 @@ when no device resolves or ffmpeg won't start."
         (progn
           (format t "  [webcam] no usable capture device for ~S; recording screen only~%" spec)
           nil)
-        (handler-case
+        (let ((mjpeg (v4l2-input-args dev)))     ; prefer MJPEG for full framerate
+         (handler-case
             (let ((proc (uiop:launch-program
-                         (list "ffmpeg" "-y" "-loglevel" "error"
-                               "-f" "v4l2" "-framerate" (format nil "~D" fps)
-                               "-i" dev
-                               "-pix_fmt" "yuv420p" path)
+                         (append (list "ffmpeg" "-y" "-loglevel" "error" "-f" "v4l2")
+                                 mjpeg
+                                 (list "-framerate" (format nil "~D" fps) "-i" dev
+                                       "-pix_fmt" "yuv420p" path))
                          :input :stream :output nil :error-output nil)))
-              (format t "  [webcam] recording ~A -> ~A~%" dev path)
+              (format t "  [webcam] recording ~A~:[~; (mjpeg)~] -> ~A~%" dev mjpeg path)
               (make-webcam-handle :proc proc :path path :device dev))
           (error (e)
             (format t "  [webcam] failed to start (~A); recording screen only~%" e)
-            nil)))))
+            nil))))))
 
 (defun %nonempty-mp4-p (path)
   "T if PATH exists and is larger than a bare container header (i.e. has frames)."

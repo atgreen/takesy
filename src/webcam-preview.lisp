@@ -85,9 +85,11 @@
 (defstruct pv cameras dir jpg device proc lock (result nil) (done nil) deadline)
 
 (defun %preview-cmd (dev jpg)
-  (list "ffmpeg" "-y" "-loglevel" "error" "-f" "v4l2"
-        "-framerate" "15" "-i" dev "-vf" "scale=480:-1"
-        "-q:v" "6" "-update" "1" jpg))
+  ;; Prefer MJPEG so the preview shows the real (full) framerate, matching capture.
+  (append (list "ffmpeg" "-y" "-loglevel" "error" "-f" "v4l2")
+          (wc:v4l2-input-args dev)
+          (list "-framerate" "15" "-i" dev "-vf" "scale=480:-1"
+                "-q:v" "6" "-update" "1" jpg)))
 
 (defun %start-ffmpeg (pv dev)
   (sb-thread:with-mutex ((pv-lock pv))

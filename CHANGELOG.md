@@ -4,6 +4,15 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Webcam captures at full framerate.** The v4l2 recorder (and preview) now prefer
+  `-input_format mjpeg` when the camera advertises it, instead of letting ffmpeg
+  pick the raw format — which is USB-bandwidth-limited and drops many cameras to a
+  low, choppy framerate. Falls back to the default for raw-only cameras.
+
 ## [1.3.1] - 2026-09-01
 
 ### Fixed
