@@ -553,6 +553,16 @@ without an over-large file."
               (%close-decoder dec)
               (%close-decoder wc-dec))))))))
 
+(defun %beep (&key (freq 880) (dur 0.12))
+  "Best-effort short audible beep for the count-in. Uses ffplay (ships with ffmpeg,
+already required); falls back to the terminal bell. Non-blocking."
+  (unless (ignore-errors
+           (uiop:launch-program
+            (list "ffplay" "-nodisp" "-autoexit" "-loglevel" "quiet" "-f" "lavfi"
+                  "-i" (format nil "sine=frequency=~D:duration=~,3F,volume=0.35" freq dur))
+            :output nil :error-output nil))
+    (write-char #\Bell) (finish-output)))
+
 (defun %persist-manifest (rec dir)
   "Re-write DIR/manifest.sexp from REC (after splicing in fields RECORD-FRAMES
 didn't know at write time, e.g. :click-times)."
@@ -586,10 +596,13 @@ recording plist."
                    read access to /dev/input. Add yourself to the 'input' group:~%~
                    sudo usermod -aG input $USER  (then log out/in). Recording~%~
                    without click data for now.~%"))
-    ;; Countdown so you can get ready after picking the share source.
+    ;; Countdown so you can get ready after picking the share source -- with an
+    ;; audible beep per count and a higher "go" tone when recording starts.
     (when (and countdown (plusp countdown))
       (loop for n from countdown downto 1
-            do (format t "  [capture] recording in ~D...~%" n) (finish-output) (sleep 1)))
+            do (%beep :freq 880)
+               (format t "  [capture] recording in ~D...~%" n) (finish-output) (sleep 1))
+      (%beep :freq 1320 :dur 0.2))
     (let* ((done nil)
            ;; evdev click capture runs alongside the frame capture; base ~ capture
            ;; start so click times align with the frame timeline.

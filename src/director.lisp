@@ -107,14 +107,17 @@ clamps to the track endpoints outside its span."
 ;;;
 ;;; All REPL-tunable.
 
-(defparameter *cursor-omega-slow* 9.0
+(defparameter *cursor-omega-slow* 20.0
   "Spring stiffness (rad/s) when the pointer is slow/settling -- smoother.")
-(defparameter *cursor-omega-fast* 30.0
-  "Spring stiffness (rad/s) when the pointer moves fast -- less lag for pointing.")
+(defparameter *cursor-omega-fast* 60.0
+  "Spring stiffness (rad/s) when the pointer moves fast. Stiff enough that the drawn
+cursor tracks the real one closely (a soft spring visibly lags a fast flick, which
+reads as the pointer being in the wrong place -- especially once zoomed in).")
 (defparameter *cursor-speed-ref* 1800.0
   "Pointer speed (px/s) at which stiffness reaches *cursor-omega-fast*.")
-(defparameter *cursor-anticipate* 0.4
-  "Seconds before a rest/click target to start aiming the cursor straight at it.")
+(defparameter *cursor-anticipate* 0.15
+  "Seconds before a rest/click target to start aiming the cursor straight at it.
+Small so the drawn cursor doesn't lead the real one noticeably.")
 
 (defun spring-step (p v x omega dt)
   "Advance a critically-damped spring one step: position P, velocity V chasing
@@ -159,7 +162,9 @@ that target to cut overshoot. Times are preserved."
                    (omega (+ omega-slow (* (- omega-fast omega-slow) frac)))
                    (tx rx) (ty ry)
                    ;; the next rest/click target within the anticipation window
-                   (next (find-if (lambda (r) (<= 0.0 (- (first r) tnow) anticipate)) rests)))
+                   ;; (only when ANTICIPATE > 0, else the /anticipate below divides by 0)
+                   (next (when (plusp anticipate)
+                           (find-if (lambda (r) (<= 0.0 (- (first r) tnow) anticipate)) rests))))
               (when next
                 (destructuring-bind (rt fx fy) next
                   (let* ((u (- 1.0 (/ (- rt tnow) anticipate)))  ; 0 far -> 1 at target

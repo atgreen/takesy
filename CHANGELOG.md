@@ -4,6 +4,21 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Audible count-in** — the 3-2-1 countdown now beeps each second (and a higher
+  tone when recording starts), via ffplay.
+
+### Fixed
+
+- **The drawn pointer tracks the real pointer.** The cursor-smoothing spring was
+  soft enough to visibly lag a fast flick (up to ~7% of frame width, magnified once
+  zoomed), reading as the pointer being in the wrong place. Stiffened it so the
+  drawn cursor stays within a couple of frame-pixels of the real position, and
+  fixed a divide-by-zero when `--cursor-anticipate` was 0.
+
 ## [1.3.3] - 2026-09-01
 
 ### Fixed

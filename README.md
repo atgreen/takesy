@@ -33,7 +33,7 @@ into a finished mp4. You just record; takesy directs the shot.
 - **Webcam framing preview** — whenever you record a live webcam, takesy first
   opens a local web page to pick the input camera and frame yourself (drag to pan,
   scroll to zoom); what you see is what gets recorded.
-- **Countdown** — a 3-2-1 before recording starts, so you can get ready.
+- **Countdown** — a 3-2-1 (with audible beeps) before recording starts, so you can get ready.
 - **Pause / resume** — `kill -USR1 <pid>` toggles capture; paused time is cut, timeline stays gapless.
 - **Audio** — optionally record desktop sound, your mic, or both, muxed into the mp4.
 - **Capture once, render many** — record once, then re-render with different
@@ -164,8 +164,8 @@ Cursor-overlay feel is still tunable:
 
 | Option | Meaning | Default |
 | --- | --- | --- |
-| `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher is snappier with less lag | `30.0` |
-| `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.4` |
+| `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher tracks the real pointer more tightly (less lag) | `60.0` |
+| `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.15` |
 
 ## How it works
 

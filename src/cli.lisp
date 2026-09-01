@@ -187,10 +187,10 @@ capture-options already carries --webcam (so it isn't declared twice)."
                         :long-name "idle-threshold" :initial-value "1.2" :key :idle-threshold)
    (clingon:make-option :string :description "kept time per cut gap, seconds (default 0.4)"
                         :long-name "max-idle" :initial-value "0.4" :key :max-idle)
-   (clingon:make-option :string :description "cursor-spring stiffness when moving fast (default 30.0)"
-                        :long-name "cursor-omega-fast" :initial-value "30.0" :key :cursor-omega-fast)
-   (clingon:make-option :string :description "seconds before a click to aim the cursor (default 0.4)"
-                        :long-name "cursor-anticipate" :initial-value "0.4" :key :cursor-anticipate)
+   (clingon:make-option :string :description "cursor-spring stiffness when moving fast (default 60.0; higher tracks tighter)"
+                        :long-name "cursor-omega-fast" :initial-value "60.0" :key :cursor-omega-fast)
+   (clingon:make-option :string :description "seconds before a click to aim the cursor (default 0.15)"
+                        :long-name "cursor-anticipate" :initial-value "0.15" :key :cursor-anticipate)
    (clingon:make-option :string :description "write the per-frame camera path (zoom/pan) to CSV"
                         :long-name "log-camera" :key :log-camera))))
 
@@ -239,8 +239,8 @@ capture-options already carries --webcam (so it isn't declared twice)."
             :cursor-hotspot    (let ((s (g :cursor-hotspot)))
                                  (if s (parse-xy s) '(0.0 . 0.0)))
             :cursor-size       (let ((s (g :cursor-size))) (when s (%float s 0.06)))
-            :cursor-omega-fast (%float (g :cursor-omega-fast) 30.0)
-            :cursor-anticipate (%float (g :cursor-anticipate) 0.4)
+            :cursor-omega-fast (%float (g :cursor-omega-fast) 60.0)
+            :cursor-anticipate (%float (g :cursor-anticipate) 0.15)
             :camera-log        (g :log-camera)
             :out               (g :output)))))
 
