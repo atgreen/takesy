@@ -34,7 +34,7 @@
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
-           #:*track*
+           #:*track* #:*cursor-contain* #:*cursor-lead* #:*cursor-margin*
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -590,6 +590,41 @@ darting after transients (G2/G3/G9: one move per task step, not per event).")
   "Centre shift (UV sum) beyond which a tight->tight move routes THROUGH Overview
 (widen-then-push-in) instead of a diagonal pan across the screen (G7/G11).")
 
+;;; Cursor containment (Phase 3b). Clicks and localized activity choose the shot,
+;;; but a zoomed frame can let the pointer slide off-screen. Keep it in view: pan
+;;; the frame the minimum needed so the cursor stays inside the edge -- so the
+;;; pointer's position also influences where the camera sits, without overriding the
+;;; editorial framing. Anticipatory: we frame where the pointer WILL be (this is a
+;;; recording, so the future is known), so the camera moves ahead of it.
+(defparameter *cursor-contain* t
+  "When true, keep the pointer inside the framed shot (pan to follow it to the edge).")
+(defparameter *cursor-lead* 0.35
+  "Seconds of look-ahead for containment -- frame where the pointer WILL be, so the
+camera leads rather than reacts.")
+(defparameter *cursor-margin* 0.10
+  "Keep the pointer at least this far (UV) inside the frame edge before panning.")
+
+(defun %contain-cursor (session tm z cx cy &key (margin *cursor-margin*))
+  "Pan the shot centre (CX,CY) at zoom Z the least amount so the cursor at TM stays
+MARGIN inside the frame edge, then clamp so the frame stays within the content. TM
+is a near-future time (anticipation). Returns (values cx cy); unchanged at zoom 1
+(the whole frame is visible) or with no cursor track."
+  (if (or (null (session-cursor session)) (<= z 1.0))
+      (values cx cy)
+      (multiple-value-bind (px py) (cursor-at session tm)
+        (let* ((w (session-width session)) (h (session-height session))
+               (ux (/ px (float w 1.0))) (uy (/ py (float h 1.0)))
+               (half (min 0.5 (/ 0.5 z)))
+               (inner (max 0.0 (- half margin)))
+               (ncx cx) (ncy cy))
+          (cond ((> ux (+ cx inner)) (setf ncx (- ux inner)))
+                ((< ux (- cx inner)) (setf ncx (+ ux inner))))
+          (cond ((> uy (+ cy inner)) (setf ncy (- uy inner)))
+                ((< uy (- cy inner)) (setf ncy (+ uy inner))))
+          ;; keep the frame inside the content (same edge-guard as the shot planner)
+          (values (min (- 1.0 half) (max half ncx))
+                  (min (- 1.0 half) (max half ncy)))))))
+
 (defun %smoother (u)
   "Smootherstep ease-in/out on [0,1]: zero velocity AND acceleration at both ends,
 so a move starts and stops gently (no mechanical constant-speed slide)."
@@ -795,7 +830,14 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                            (%xition a b (/ (- tm (- (shot-t0 b) d)) d))
                            (values (shot-zoom a) (shot-cx a) (shot-cy a)))
                      (when (zerop (mod i emit-every))
-                       (push (frame tm (max 1.0 z) cx cy) kfs))
+                       (let ((zz (max 1.0 z)))
+                         ;; keep the (near-future) pointer in view, panning the least
+                         ;; amount needed -- the pointer influences where we sit.
+                         (multiple-value-bind (ccx ccy)
+                             (if *cursor-contain*
+                                 (%contain-cursor session (+ tm *cursor-lead*) zz cx cy)
+                                 (values cx cy))
+                           (push (frame tm zz ccx ccy) kfs))))
                      (incf i)))))
       (push (frame 0.0 1.0 0.5 0.5) kfs)
       (%clean-timeline kfs))))

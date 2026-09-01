@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The auto-zoom camera keeps the pointer in view.** Clicks and screen activity
+  still choose the shot, but the pointer's position now influences where the camera
+  sits: a zoomed frame pans the minimum needed so the cursor never slides off-screen,
+  and it does so *anticipatorily* — framing where the pointer is heading (the
+  recording's known future), so the camera leads rather than reacts. Tunable via
+  `*cursor-contain*` / `*cursor-lead*` / `*cursor-margin*`.
+
 ### Fixed
 
 - **Webcam captures at full framerate.** The v4l2 recorder (and preview) now prefer
