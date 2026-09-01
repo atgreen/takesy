@@ -4,6 +4,18 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Camera pointer-follow no longer offsets the pointer or lurches on back-and-forth
+  motion.** The 1.3.2 containment framed a look-ahead point (which pushed the drawn
+  pointer off to one side) and panned to chase the cursor (nauseating when the
+  pointer moved back and forth). It now frames the pointer's recent *range* without
+  leading the centre, and **widens** to hold a wide or oscillating range instead of
+  panning after it — steady frame, centred pointer. Tunables `*cursor-window*` /
+  `*cursor-relax*` / `*cursor-margin*`.
+
 ## [1.3.2] - 2026-09-01
 
 ### Changed

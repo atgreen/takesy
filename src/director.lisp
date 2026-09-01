@@ -34,7 +34,7 @@
            #:*activity-gap* #:detect-activity
            #:*dwell-speed* #:*dwell-min* #:detect-dwell-activity
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
-           #:*track* #:*cursor-contain* #:*cursor-lead* #:*cursor-margin*
+           #:*track* #:*cursor-contain* #:*cursor-window* #:*cursor-margin*
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -591,38 +591,80 @@ darting after transients (G2/G3/G9: one move per task step, not per event).")
 (widen-then-push-in) instead of a diagonal pan across the screen (G7/G11).")
 
 ;;; Cursor containment (Phase 3b). Clicks and localized activity choose the shot,
-;;; but a zoomed frame can let the pointer slide off-screen. Keep it in view: pan
-;;; the frame the minimum needed so the cursor stays inside the edge -- so the
-;;; pointer's position also influences where the camera sits, without overriding the
-;;; editorial framing. Anticipatory: we frame where the pointer WILL be (this is a
-;;; recording, so the future is known), so the camera moves ahead of it.
+;;; but a zoomed frame can let the pointer slide off-screen. Keep it in view by
+;;; framing the pointer's RANGE over a short window straddling now (recent + near
+;;; future): pan the least amount to include it, and -- crucially -- WIDEN (zoom
+;;; out) rather than pan when the range is too wide for the current zoom. So the
+;;; pointer influences the camera (it stays visible), and a pointer that darts back
+;;; and forth makes the camera pull out to hold the whole span instead of swinging
+;;; after it. Framing the RANGE (not a look-ahead point) means the centre isn't led,
+;;; so the drawn pointer isn't pushed off to one side.
 (defparameter *cursor-contain* t
-  "When true, keep the pointer inside the framed shot (pan to follow it to the edge).")
-(defparameter *cursor-lead* 0.35
-  "Seconds of look-ahead for containment -- frame where the pointer WILL be, so the
-camera leads rather than reacts.")
+  "When true, keep the pointer in view: frame its recent range, widening rather than
+panning when it ranges wide.")
+(defparameter *cursor-window* 0.6
+  "Half-width (s) of the window around now whose cursor range feeds the held box.
+Straddles now (recent + near future) and is wide enough to span a typical back-and-
+forth, so the frame settles to hold the whole sweep instead of chasing it.")
 (defparameter *cursor-margin* 0.10
-  "Keep the pointer at least this far (UV) inside the frame edge before panning.")
+  "Keep the pointer range at least this far (UV) inside the frame edge.")
+(defparameter *cursor-relax* 0.2
+  "How fast (UV/s) the held containment box shrinks back toward the pointer once it
+stops ranging wide. It EXPANDS instantly to hold a dart, then relaxes slowly -- so a
+back-and-forth pointer settles the frame wide instead of pumping the zoom.")
 
-(defun %contain-cursor (session tm z cx cy &key (margin *cursor-margin*))
-  "Pan the shot centre (CX,CY) at zoom Z the least amount so the cursor at TM stays
-MARGIN inside the frame edge, then clamp so the frame stays within the content. TM
-is a near-future time (anticipation). Returns (values cx cy); unchanged at zoom 1
-(the whole frame is visible) or with no cursor track."
-  (if (or (null (session-cursor session)) (<= z 1.0))
-      (values cx cy)
-      (multiple-value-bind (px py) (cursor-at session tm)
-        (let* ((w (session-width session)) (h (session-height session))
-               (ux (/ px (float w 1.0))) (uy (/ py (float h 1.0)))
-               (half (min 0.5 (/ 0.5 z)))
+(defun %cursor-window-bbox (session t0 t1)
+  "UV bounding box the cursor covers over [T0,T1] (dense track plus interpolated
+endpoints). Return (values x0 y0 x1 y1), or NIL with no cursor track."
+  (let ((c (session-cursor session)))
+    (when c
+      (let ((w (float (session-width session) 1.0)) (h (float (session-height session) 1.0))
+            (x0 nil) (y0 nil) (x1 nil) (y1 nil))
+        (flet ((acc (px py)
+                 (let ((ux (/ px w)) (uy (/ py h)))
+                   (setf x0 (if x0 (min x0 ux) ux) x1 (if x1 (max x1 ux) ux)
+                         y0 (if y0 (min y0 uy) uy) y1 (if y1 (max y1 uy) uy)))))
+          (multiple-value-call #'acc (cursor-at session t0))
+          (multiple-value-call #'acc (cursor-at session t1))
+          (dolist (cs c)
+            (when (<= t0 (cursor-sample-time cs) t1)
+              (acc (cursor-sample-x cs) (cursor-sample-y cs)))))
+        (values x0 y0 x1 y1)))))
+
+(defun %relax-box (held wb dt)
+  "Update the held containment box HELD (list x0 y0 x1 y1) toward the window box WB
+(same shape): expand instantly to include WB, shrink toward it by at most
+*cursor-relax**DT. Returns the new box. HELD or WB NIL -> the other."
+  (cond ((null wb) held)
+        ((null held) (copy-list wb))
+        (t (destructuring-bind (hx0 hy0 hx1 hy1) held
+             (destructuring-bind (wx0 wy0 wx1 wy1) wb
+               (let ((r (* *cursor-relax* dt)))
+                 (list (if (< wx0 hx0) wx0 (min wx0 (+ hx0 r)))   ; left edge
+                       (if (< wy0 hy0) wy0 (min wy0 (+ hy0 r)))   ; top
+                       (if (> wx1 hx1) wx1 (max wx1 (- hx1 r)))   ; right
+                       (if (> wy1 hy1) wy1 (max wy1 (- hy1 r))))))))))  ; bottom
+
+(defun %contain-box (z cx cy box &key (margin *cursor-margin*))
+  "Adjust the shot (Z,CX,CY) to hold the UV BOX (x0 y0 x1 y1) with MARGIN: WIDEN the
+zoom to fit it (never tighter than Z, never below overview) and pan the least amount
+to include it -- so once widened to just fit, the box is centred. Returns
+(values zoom cx cy). Unchanged at zoom 1 or with no BOX."
+  (if (or (<= z 1.0) (null box))
+      (values z cx cy)
+      (destructuring-bind (x0 y0 x1 y1) box
+        (let* ((span (max (- x1 x0) (- y1 y0)))
+               (need (+ span (* 2.0 margin)))
+               (zc   (max 1.0 (min z (if (plusp need) (/ 1.0 need) z))))
+               (half (min 0.5 (/ 0.5 zc)))
                (inner (max 0.0 (- half margin)))
                (ncx cx) (ncy cy))
-          (cond ((> ux (+ cx inner)) (setf ncx (- ux inner)))
-                ((< ux (- cx inner)) (setf ncx (+ ux inner))))
-          (cond ((> uy (+ cy inner)) (setf ncy (- uy inner)))
-                ((< uy (- cy inner)) (setf ncy (+ uy inner))))
-          ;; keep the frame inside the content (same edge-guard as the shot planner)
-          (values (min (- 1.0 half) (max half ncx))
+          (when (> x1 (+ ncx inner)) (setf ncx (- x1 inner)))
+          (when (< x0 (- ncx inner)) (setf ncx (+ x0 inner)))
+          (when (> y1 (+ ncy inner)) (setf ncy (- y1 inner)))
+          (when (< y0 (- ncy inner)) (setf ncy (+ y0 inner)))
+          (values zc
+                  (min (- 1.0 half) (max half ncx))
                   (min (- 1.0 half) (max half ncy)))))))
 
 (defun %smoother (u)
@@ -802,7 +844,9 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
   (let* ((dur (session-duration session))
          (dt (/ 1.0 60.0)) (emit-every 3)
          (sv (coerce shots 'vector)) (nsh (length sv))
-         (kfs '()) (i 0))
+         (kfs '()) (i 0)
+         (have-cursor (and (session-cursor session) t))
+         (held nil))                    ; decaying containment box (UV x0 y0 x1 y1)
     (flet ((frame (time zoom ccx ccy)
              (kf:make-keyframe :time (max 0.0 (min dur (float time 1.0)))
                                :zoom (float zoom 1.0)
@@ -829,15 +873,24 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                        (if in-x
                            (%xition a b (/ (- tm (- (shot-t0 b) d)) d))
                            (values (shot-zoom a) (shot-cx a) (shot-cy a)))
+                     ;; Grow/relax the held cursor box every step so it settles wide
+                     ;; on a ranging pointer instead of pumping frame-to-frame.
+                     (when (and *cursor-contain* have-cursor)
+                       (multiple-value-bind (wx0 wy0 wx1 wy1)
+                           (%cursor-window-bbox session (- tm *cursor-window*)
+                                                (+ tm *cursor-window*))
+                         (setf held (%relax-box held (when wx0 (list wx0 wy0 wx1 wy1))
+                                                (float dt 1.0)))))
                      (when (zerop (mod i emit-every))
                        (let ((zz (max 1.0 z)))
-                         ;; keep the (near-future) pointer in view, panning the least
-                         ;; amount needed -- the pointer influences where we sit.
-                         (multiple-value-bind (ccx ccy)
-                             (if *cursor-contain*
-                                 (%contain-cursor session (+ tm *cursor-lead*) zz cx cy)
-                                 (values cx cy))
-                           (push (frame tm zz ccx ccy) kfs))))
+                         ;; keep the pointer's held range in view -- widen rather than
+                         ;; pan when it ranges wide (pointer influences where we sit,
+                         ;; without leading the centre or chasing back and forth).
+                         (multiple-value-bind (cz ccx ccy)
+                             (if (and *cursor-contain* held)
+                                 (%contain-box zz cx cy held)
+                                 (values zz cx cy))
+                           (push (frame tm cz ccx ccy) kfs))))
                      (incf i)))))
       (push (frame 0.0 1.0 0.5 0.5) kfs)
       (%clean-timeline kfs))))
