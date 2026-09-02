@@ -593,6 +593,14 @@ shot rather than alternated between.")
 to it. A brief flash -- a <1s repaint, popup, or result panel elsewhere -- never
 persists long enough to earn a cut, so the camera stays on the task instead of
 darting after transients (G2/G3/G9: one move per task step, not per event).")
+(defparameter *shot-fit-lookahead* 2.0
+  "Seconds ahead the shot-size fit looks at the POINTER's travel. A click's own box
+is a point, so %bucket-zoom would always pick DETAIL -- but if the pointer then
+roams across the screen, a tight shot forces cursor-containment to chase it (the
+source of the residual pan jerk). Growing the shot box to include where the pointer
+actually goes during the hold makes the director pick a shot wide enough to HOLD the
+work, so the camera sits still instead. ~one hold (*shot-min-hold*) is the horizon we
+can commit to; containment covers anything beyond (green-screen-cjx / g9f).")
 
 (defstruct (shot (:constructor make-shot (t0 t1 kind cx cy zoom)))
   t0 t1 kind cx cy zoom)
@@ -604,9 +612,20 @@ darting after transients (G2/G3/G9: one move per task step, not per event).")
 (defparameter *move-dur-large* 0.95  "Large transition duration (s) (G7 800-1100ms).")
 (defparameter *move-small-mag* 0.15  "Centre shift (UV sum) below which a move is small.")
 (defparameter *move-large-mag* 0.50  "Centre shift (UV sum) above which a move is large.")
-(defparameter *move-far* 0.50
-  "Centre shift (UV sum) beyond which a tight->tight move routes THROUGH Overview
-(widen-then-push-in) instead of a diagonal pan across the screen (G7/G11).")
+(defparameter *move-far-spans* 1.0
+  "Widen-through-Overview trigger, in VIEWPORT-SPANS the framed content slides on
+screen: Euclidean UV centre distance scaled by the mean of the two zooms. Raw UV
+distance ignores zoom, but the same jump is trivial when wide and disorienting when
+tight -- what matters is how far content travels *in frame*. ~1.0 span = the target
+leaves the frame entirely; below it a direct pan+zoom keeps the viewer oriented and
+engaged, so only genuinely large jumps establish wide first (G7/G11). The old raw
+sum-of-axes threshold (0.50) fired on a mere 0.68-span move and pulled all the way
+out to the desktop for continuous same-area work (green-screen-g9f). Soft band is
+~0.9-1.1; a progressive partial dip would remove the cliff entirely (g9f follow-up).")
+(defparameter *move-dur-through* 1.5
+  "Duration (s) of a widen-through-Overview transition. Longer than *move-dur-large*
+because it is really TWO gestures (zoom out, then in): a single large-move budget
+forced both phases to ~2x speed, which read as a whip at 4-5s (green-screen-g9f).")
 
 ;;; Cursor containment (Phase 3b). Clicks and localized activity choose the shot,
 ;;; but a zoomed frame can let the pointer slide off-screen. Keep it in view by
@@ -634,6 +653,23 @@ back-and-forth pointer settles the frame wide instead of pumping the zoom.")
   "Low-pass time constant (s) applied to the pointer BEFORE the camera frames it, so
 hand tremor / high-frequency motion doesn't make the camera jitter. Only the camera
 sees this smoothing; the drawn cursor overlay stays on the accurate track. 0 = off.")
+(defparameter *contain-deadband* 0.72
+  "Deadband for pointer containment: while the (smoothed) pointer sits within this
+fraction of the frame's half-size from centre, containment stays SILENT and the
+camera holds the director's shot dead still. Containment ramps in only as the
+pointer crosses from here out to the frame edge. Without it, containment nudges on
+almost every active frame (the pointer is rarely exactly centred), so the camera
+drifts constantly instead of holding -- the residual 'restlessness' after the jerk
+was sprung out (green-screen-g9f).")
+(defparameter *cursor-contain-omega* 7.0
+  "Stiffness (rad/s) of the critically-damped spring that EASES the containment
+correction into the planned camera path. %contain-box is a hard per-frame geometric
+correction off a box that jumps when the pointer darts; applied raw it doubled the
+frames-in-motion and quadrupled peak acceleration -- the camera twitched all through
+a clip while chasing the pointer. Springing the correction (a delta on top of the
+planned shot) keeps deliberate moves crisp but turns containment into a slow, calm
+drift. Lower = calmer but the pointer can ride nearer the edge before the frame
+catches up (green-screen-g9f).")
 
 (defun %smooth-cursor-track (samples tau)
   "Return a low-passed (EMA, time-constant TAU seconds) copy of a cursor SAMPLES
@@ -711,18 +747,25 @@ to include it -- so once widened to just fit, the box is centred. Returns
 so a move starts and stops gently (no mechanical constant-speed slide)."
   (let ((x (max 0.0 (min 1.0 u)))) (* x x x (+ (* x (- (* x 6.0) 15.0)) 10.0))))
 
-(defun %move-dur (a b)
-  "Transition duration between shots A and B, bucketed by centre distance."
-  (let ((mag (+ (abs (- (shot-cx a) (shot-cx b))) (abs (- (shot-cy a) (shot-cy b))))))
-    (cond ((< mag *move-small-mag*) *move-dur-small*)
-          ((< mag *move-large-mag*) *move-dur-normal*)
-          (t *move-dur-large*))))
-
 (defun %far-through-overview-p (a b)
-  "T when the move is a long tight->tight jump that should route through Overview."
+  "T when the move slides the framed content far enough (in viewport-spans, i.e.
+zoom-scaled centre travel) to establish wide through Overview rather than pan
+directly. Both ends must be zoomed in; a wide end is already establishing."
   (and (> (shot-zoom a) 1.05) (> (shot-zoom b) 1.05)
-       (> (+ (abs (- (shot-cx a) (shot-cx b))) (abs (- (shot-cy a) (shot-cy b))))
-          *move-far*)))
+       (>= (* (sqrt (+ (expt (- (shot-cx a) (shot-cx b)) 2)
+                       (expt (- (shot-cy a) (shot-cy b)) 2)))
+              (* 0.5 (+ (shot-zoom a) (shot-zoom b))))
+           *move-far-spans*)))
+
+(defun %move-dur (a b)
+  "Transition duration between shots A and B. A widen-through-Overview move gets its
+own (longer) budget -- it does two gestures; others bucket by centre distance."
+  (if (%far-through-overview-p a b)
+      *move-dur-through*
+      (let ((mag (+ (abs (- (shot-cx a) (shot-cx b))) (abs (- (shot-cy a) (shot-cy b))))))
+        (cond ((< mag *move-small-mag*) *move-dur-small*)
+              ((< mag *move-large-mag*) *move-dur-normal*)
+              (t *move-dur-large*)))))
 
 (defun %xition (a b u)
   "Eased camera framing a fraction U in [0,1] through the A->B transition. Returns
@@ -846,6 +889,13 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
                  (when second
                    (setf x0 (min x0 (cand-x0 second)) y0 (min y0 (cand-y0 second))
                          x1 (max x1 (cand-x1 second)) y1 (max y1 (cand-y1 second))))
+                 ;; spread-aware fit: grow the box to include where the pointer travels
+                 ;; during the coming hold, so a shot is only as tight as the work is
+                 ;; localized -- the camera holds instead of containment chasing (cjx).
+                 (multiple-value-bind (sx0 sy0 sx1 sy1)
+                     (%cursor-window-bbox session tm (+ tm *shot-fit-lookahead*))
+                   (when sx0
+                     (setf x0 (min x0 sx0) y0 (min y0 sy0) x1 (max x1 sx1) y1 (max y1 sy1))))
                  (multiple-value-bind (z kind) (%bucket-zoom x0 y0 x1 y1 allow-detail)
                    ;; clamp the target to the edge-guard BEFORE deciding it moved,
                    ;; so activity that clamps to the same frame isn't re-cut forever.
@@ -886,6 +936,10 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
          (kfs '()) (i 0)
          (have-cursor (and (session-cursor session) t))
          (held nil)                     ; decaying containment box (UV x0 y0 x1 y1)
+         ;; Spring-smoothed containment correction (a DELTA on the planned path) and
+         ;; its velocity, per axis + zoom. Eased so the pointer-follow drifts calmly
+         ;; instead of twitching frame-to-frame (green-screen-g9f).
+         (sdx 0.0) (sdy 0.0) (sdz 0.0) (vdx 0.0) (vdy 0.0) (vdz 0.0)
          ;; The camera frames a LOW-PASSED cursor so hand tremor doesn't jitter it;
          ;; the overlay still draws the accurate track (green-screen).
          (cam-session (make-session :width (session-width session)
@@ -913,10 +967,19 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                         ;; clamp d so it fits inside the outgoing shot's hold.
                         (d (when b (min (%move-dur a b)
                                         (max 0.1 (- (shot-t0 b) (shot-t0 a))))))
-                        (in-x (and b (>= tm (- (shot-t0 b) d)))))
+                        (in-x (and b (>= tm (- (shot-t0 b) d))))
+                        (uf   (if in-x (/ (- tm (- (shot-t0 b) d)) d) 0.0))
+                        ;; A widen-through-Overview move crosses z=1, where
+                        ;; %contain-box is discontinuous (it snaps the centre to 0.5).
+                        ;; Fade containment out across the middle of such a move so the
+                        ;; snap lands where its weight is ~0, and full containment
+                        ;; resumes at each end to match the held shots (green-screen-g9f).
+                        (through-x (and in-x (%far-through-overview-p a b)))
+                        ;; weight: 1 at the move's ends, 0 at its wide midpoint.
+                        (cw   (if through-x (let ((s (- (* 2.0 uf) 1.0))) (* s s)) 1.0)))
                    (multiple-value-bind (z cx cy)
                        (if in-x
-                           (%xition a b (/ (- tm (- (shot-t0 b) d)) d))
+                           (%xition a b uf)
                            (values (shot-zoom a) (shot-cx a) (shot-cy a)))
                      ;; Grow/relax the held cursor box every step so it settles wide
                      ;; on a ranging pointer instead of pumping frame-to-frame.
@@ -926,17 +989,46 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                                                 (+ tm *cursor-window*))
                          (setf held (%relax-box held (when wx0 (list wx0 wy0 wx1 wy1))
                                                 (float dt 1.0)))))
-                     (when (zerop (mod i emit-every))
-                       (let ((zz (max 1.0 z)))
-                         ;; keep the pointer's held range in view -- widen rather than
-                         ;; pan when it ranges wide (pointer influences where we sit,
-                         ;; without leading the centre or chasing back and forth).
-                         (multiple-value-bind (cz ccx ccy)
-                             (if (and *cursor-contain* held)
-                                 (%contain-box zz cx cy held)
-                                 (values zz cx cy))
-                           (push (frame tm cz ccx ccy) kfs))))
-                     (incf i)))))
+                     ;; Containment target: how far to PAN the planned frame to keep
+                     ;; the pointer in view. The DIRECTOR owns the zoom -- containment
+                     ;; only pans, never widens (its zoom pull-outs during held detail
+                     ;; shots were the most jarring motion in a clip; the director's
+                     ;; shot choice, not the pointer, decides how tight we sit). The
+                     ;; correction is gated by a deadband and eased with a critically-
+                     ;; damped spring EVERY step, so it drifts in gently instead of
+                     ;; snapping, and only near the frame edge (green-screen-g9f).
+                     (let ((zz (max 1.0 z)) (tdx 0.0) (tdy 0.0) (tdz 0.0))
+                       (when (and *cursor-contain* held)
+                         (multiple-value-bind (kz kx ky) (%contain-box zz cx cy held)
+                           (declare (ignore kz))  ; pan only; the director owns the zoom
+                           ;; Deadband gate: how far the smoothed pointer sits from the
+                           ;; planned centre, as a fraction of the frame half-size. 0 =
+                           ;; centred, 1 = at the edge. Below *contain-deadband* the gate
+                           ;; is 0 (hold dead still); it smoothersteps to 1 at the edge,
+                           ;; so containment only engages as the pointer threatens to
+                           ;; leave -- the camera holds the shot the rest of the time (g9f).
+                           (let ((gate 1.0))
+                             (when have-cursor
+                               (multiple-value-bind (px py) (cursor-at cam-session tm)
+                                 (let* ((w  (float (session-width session) 1.0))
+                                        (h  (float (session-height session) 1.0))
+                                        (half (max 1e-3 (min 0.5 (/ 0.5 zz))))
+                                        (off  (/ (max (abs (- (/ px w) cx)) (abs (- (/ py h) cy)))
+                                                 half)))
+                                   (setf gate (%smoother (/ (- off *contain-deadband*)
+                                                            (max 1e-3 (- 1.0 *contain-deadband*))))))))
+                             (setf tdx (* cw gate (- kx cx))
+                                   tdy (* cw gate (- ky cy))
+                                   tdz 0.0))))               ; pan only; director owns zoom
+                       (multiple-value-setq (sdx vdx)
+                         (spring-step sdx vdx tdx *cursor-contain-omega* (float dt 1.0)))
+                       (multiple-value-setq (sdy vdy)
+                         (spring-step sdy vdy tdy *cursor-contain-omega* (float dt 1.0)))
+                       (multiple-value-setq (sdz vdz)
+                         (spring-step sdz vdz tdz *cursor-contain-omega* (float dt 1.0)))
+                       (when (zerop (mod i emit-every))
+                         (push (frame tm (+ zz sdz) (+ cx sdx) (+ cy sdy)) kfs))
+                       (incf i))))))
       (push (frame 0.0 1.0 0.5 0.5) kfs)
       (%clean-timeline kfs))))
 

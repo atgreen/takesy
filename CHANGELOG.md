@@ -4,6 +4,29 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.9] - 2026-09-01
+
+### Changed
+
+- **The auto-zoom camera is much calmer.** Three fixes to the editorial director,
+  after studying a real recording that still felt jerky:
+  - **No more gratuitous zoom-out on moderate reframes.** Whether to establish wide
+    (widen-through-overview) vs. move directly is now decided by how far the framed
+    content actually slides *on screen* (zoom-scaled viewport-spans), not raw UV
+    distance. A moderate working→detail reframe now pans-and-tightens directly
+    instead of pulling all the way out to the desktop and punching back in.
+  - **Cursor-containment no longer twitches.** Keeping the pointer in frame used to
+    apply a hard per-frame correction that doubled the camera's frames-in-motion and
+    quadrupled its peak acceleration. It is now eased with a critically-damped spring
+    and gated by a deadband (it holds dead still while the pointer sits comfortably
+    inside the frame), and it only *pans* — the director owns the zoom, so there are
+    no jarring zoom pull-outs during a held shot.
+  - **The director picks wider shots for roaming activity.** Shot size now accounts
+    for where the pointer travels during the hold, so a shot is only as tight as the
+    work is localized — the camera holds still instead of chasing a wandering pointer.
+  - Net on the test clip: peak camera acceleration down ~3.7×, perceptible pan and
+    zoom motion each roughly halved, with the pointer still kept in frame.
+
 ## [1.3.8] - 2026-09-01
 
 ### Added
