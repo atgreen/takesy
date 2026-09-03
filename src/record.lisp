@@ -818,6 +818,7 @@ recording plist."
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
                                   (camera-smoothing dir:*camera-cursor-tau*)
+                                  (damage-anchor dir:*damage-anchor*) ; :reading | :center (green-screen-pxi)
                                   (style nil)   ; :calm (default) | :energetic; long-form forces :calm
                                   (reduced-motion nil)  ; cuts instead of pans/zooms (a11y)
                                   (lint nil)            ; print the motion-linter report
@@ -838,6 +839,7 @@ different config. Return (values out n-frames)."
   (let ((dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
         (dir:*camera-cursor-tau* camera-smoothing)
+        (dir:*damage-anchor* damage-anchor)
         (dir:*reduced-motion* reduced-motion)
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
         (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image))))

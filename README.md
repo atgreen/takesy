@@ -169,6 +169,7 @@ Cursor feel and how much the camera reacts to the pointer are tunable:
 | `--cursor-omega-fast R` | cursor-spring stiffness when the pointer moves fast — higher tracks the real pointer more tightly (less lag) | `60.0` |
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.15` |
 | `--camera-smoothing S` | smooth hand tremor out of the auto-zoom camera, seconds (`0` = off) | `0.15` |
+| `--damage-anchor MODE` | how the camera frames screen activity: `reading` keeps the left column / top context in view; `center` centres on the change | `reading` |
 
 ## How it works
 

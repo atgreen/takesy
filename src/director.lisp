@@ -39,7 +39,8 @@
            #:*camera-style* #:*long-form-seconds* #:apply-camera-style #:resolve-camera-style
            #:apply-resolution-cap #:*shot-overview* #:*shot-working* #:*shot-detail*
            #:*reduced-motion* #:lint-camera-plan
-           #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
+           #:*damage-include-radius* #:*damage-anchor*
+           #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
 
@@ -483,6 +484,12 @@ leads by ~move-duration + a settle margin; Energetic leads less (akn.7). The com
 dwell gate still prevents committing to a target the pointer only passes through.")
 (defparameter *evi-click-hold* 1.1
   "Seconds AFTER a click that its (strong) evidence persists.")
+(defparameter *evi-click-lead-per-dist* 0.7
+  "Extra anticipation lead (s) per unit of move distance (UV, sum-of-axes) between
+the current shot centre and the click. A far click (e.g. a tight corner shot to the
+opposite side) needs a longer traverse, so the camera must start moving earlier to
+SETTLE before the click lands rather than arriving with it. Scales *evi-click-lead*
+up with distance (green-screen-fuj); a same-spot click keeps the base lead.")
 (defparameter *evi-cursor-weight* 0.12
   "Strength of the bare-cursor candidate: weak supporting evidence only, never on
 its own a reason to move.")
@@ -550,10 +557,12 @@ rects are excluded; a region grown globally wide is down-weighted."
             collect (make-cand cx cy x0 y0 x1 y1 str :damage) into out
           finally (return (sort out #'> :key #'cand-strength)))))
 
-(defun evidence-at (session t0 t1 &optional located-clicks)
+(defun evidence-at (session t0 t1 &optional located-clicks shot-cx shot-cy)
   "Ranked attention candidates for the window [T0,T1], strongest first. LOCATED-
 CLICKS is the precomputed (%located-clicks) list (pass it to avoid recomputing per
-call). Clicks outrank damage; a bare cursor is a weak last resort."
+call). Clicks outrank damage; a bare cursor is a weak last resort. SHOT-CX/SHOT-CY,
+when given, are the current shot centre: a click's anticipation lead grows with its
+distance from there so a far click settles before it lands (green-screen-fuj)."
   (let* ((now t1)
          (clicks (or located-clicks (%located-clicks session)))
          (out (%damage-regions session t0 t1)))
@@ -562,7 +571,12 @@ call). Clicks outrank damage; a bare cursor is a weak last resort."
     ;; can start moving before it lands (anticipation, guideline 4).
     (dolist (c clicks)
       (destructuring-bind (tc ccx ccy) c
-        (when (<= (- tc *evi-click-lead*) now (+ tc *evi-click-hold*))
+        (let ((lead (if shot-cx
+                        (+ *evi-click-lead*
+                           (* *evi-click-lead-per-dist*
+                              (+ (abs (- ccx shot-cx)) (abs (- ccy shot-cy)))))
+                        *evi-click-lead*)))
+        (when (<= (- tc lead) now (+ tc *evi-click-hold*))
           ;; boost a co-located damage region, else add a click candidate
           (let ((near (find-if (lambda (r)
                                   (<= (+ (abs (- ccx (cand-cx r))) (abs (- ccy (cand-cy r))))
@@ -573,7 +587,7 @@ call). Clicks outrank damage; a bare cursor is a weak last resort."
                       (cand-kind near) :click)
                 (push (make-cand ccx ccy (- ccx 0.06) (- ccy 0.06)
                                  (+ ccx 0.06) (+ ccy 0.06) 1.0 :click)
-                      out))))))
+                      out)))))))
     ;; weak cursor fallback so there is always *a* candidate
     (multiple-value-bind (x y) (cursor-at session now)
       (let ((cx (/ x (session-width session))) (cy (/ y (session-height session))))
@@ -628,6 +642,11 @@ parks at -- unlike a normal shot it does NOT inherit the full *shot-min-hold* (a
 shot rather than alternated between.")
 (defparameter *shot-establish* 1.0
   "Hold the opening Overview at least this long before the first close view.")
+(defparameter *shot-establish-hold* 6.0
+  "Seconds a WIDE shot from a scene change (context reset or reveal) lingers before
+the camera may push back in -- much longer than a normal cut so the viewer takes in
+the new page / dialog instead of the camera diving straight back to detail. The
+push-in still also needs a settled target, so this is a floor, not a fixed wait.")
 (defparameter *shot-move-eps* 0.14
   "Centre must shift more than this (UV, sum-of-axes) to count as a real reframe.")
 (defparameter *shot-dead-zone* 0.7
@@ -649,6 +668,15 @@ source of the residual pan jerk). Growing the shot box to include where the poin
 actually goes during the hold makes the director pick a shot wide enough to HOLD the
 work, so the camera sits still instead. ~one hold (*shot-min-hold*) is the horizon we
 can commit to; containment covers anything beyond (green-screen-cjx / g9f).")
+
+(defparameter *damage-anchor* :reading
+  "How a DAMAGE shot places its zoom window over the activity box (green-screen-pxi).
+:reading anchors the window's TOP-LEFT to the activity's top-left (keeping the left
+column / line-starts and the context above it in frame -- right for terminals,
+editors, docs, any left/top-anchored text); :center centers on the box centroid (the
+old behaviour, which pushes the left edge off-screen and dives into the middle of a
+big repaint like a directory listing). Clicks are always centered on the click, so
+this only affects damage/cursor-driven shots. REPL/render-tunable.")
 
 (defstruct (shot (:constructor make-shot (t0 t1 kind cx cy zoom &optional reason)))
   t0 t1 kind cx cy zoom
@@ -700,12 +728,18 @@ restores the livelier short-clip behaviour. Returns the style applied."
   (ecase style
     (:calm
      (setf *shot-working* 1.4   *shot-detail* 1.6
-           *shot-min-hold* 3.5  *shot-hysteresis* 2.0  *shot-idle-widen* 4.5
+           ;; Hold the zoom through mid-task thinking pauses instead of yo-yoing out
+           ;; to Overview and back (green-screen-pxi feedback): a 4.5s idle widened on
+           ;; every gap between terminal commands. Only a genuinely long lull (task
+           ;; done) should widen; context changes still reset wide immediately.
+           *shot-min-hold* 3.5  *shot-hysteresis* 2.0  *shot-idle-widen* 12.0
            *shot-commit-dwell* 1.0 *shot-move-eps* 0.14 *shot-dead-zone* 0.7
-           ;; Breathe rarely: a fixed timer that fires every 15s produced an in-out-
-           ;; in-out yo-yo on longer clips. Hold the work region far longer; context
-           ;; changes and genuine lulls provide most wide moments (akn.9, 1:12-1:27).
-           *shot-reestablish-after* 30.0 *shot-reestablish-hold* 1.5
+           ;; Never breathe on a timer: widening to Overview without any new content
+           ;; to reveal reads as gratuitous (a user watching a 60s hold saw the 30s
+           ;; breath as an unnecessary out-and-back). Wide moments now come only from
+           ;; a REASON -- context change, reveal, or a genuine long lull (green-screen-
+           ;; fuj). Effectively off; REPL-lower it if a long clip ever needs a breath.
+           *shot-reestablish-after* 1.0e9 *shot-reestablish-hold* 1.5
            *evi-click-lead* 0.8
            *move-dur-small* 0.50 *move-dur-normal* 0.65 *move-dur-large* 0.85
            *move-dur-through* 1.3))
@@ -953,9 +987,58 @@ that warrants an establishing RESET to Overview (akn.6)."
                  (>= (* (- x1 x0) (- y1 y0)) *context-change-area*))))
         (session-damage session)))
 
+(defparameter *reveal-min-size* 0.4
+  "A damage region at least this big (UV max axis) that appears AWAY from the current
+shot reveals it: the camera widens to Overview so the whole thing is visible. This
+is the dialog/menu/panel case -- a new element the tight shot doesn't contain -- that
+*evi-global-dim* + hysteresis would otherwise bury (green-screen-fuj).")
+(defparameter *reveal-dist* 0.25
+  "How far (UV, sum-of-axes) a reveal region's centre must sit from the CURRENT shot
+centre to count as 'somewhere else' -- so a modal that pops elsewhere reveals, while
+more output in the same place (a big ls in the terminal we're already framing) does
+not, and the held zoom stays put.")
+
+(defun %reveal-candidate (ev cx cy)
+  "The first evidence region big enough and far enough from the current shot centre
+(CX,CY) to warrant a reveal-widen, or NIL. Clicks/cursor are excluded -- a click
+reframes normally; this is for large NEW content that loses the hysteresis contest."
+  (find-if (lambda (c)
+             (and (eq (cand-kind c) :damage)
+                  (>= (cand-strength c) *shot-worth*)
+                  (>= (max (- (cand-x1 c) (cand-x0 c)) (- (cand-y1 c) (cand-y0 c)))
+                      *reveal-min-size*)
+                  (> (+ (abs (- (cand-cx c) cx)) (abs (- (cand-cy c) cy))) *reveal-dist*)))
+           ev))
+
+(defparameter *reveal-area* 0.35
+  "A raw damage rect covering at least this fraction of the frame, coinciding with a
+click, is a click-driven page-scale change (browser navigation, a full panel/dialog)
+-- the whole view changed on purpose, so the camera stays / goes WIDE to show it
+rather than punching into the click. compute-damage's per-frame bbox for such a
+repaint is too wide for %damage-regions (>*damage-max-rect*), so it never becomes a
+normal candidate; this catches it from the raw track. Keyboard-driven repaints of the
+same size (a big ls) have no click and are unaffected (green-screen-fuj).")
+(defparameter *reveal-repaint-lookahead* 1.5
+  "Seconds to look AHEAD for the repaint, since it follows the click by a beat -- so
+the reveal preempts the establish push-in instead of punching in then widening.")
+(defparameter *reveal-cooldown* 2.5
+  "Min seconds between click-repaint reveals -- long enough not to re-fire across one
+repaint's multi-frame window, short enough that DISTINCT navigation clicks each
+reveal. Deliberately NOT the 20s *context-reset-cooldown*: a browser nav 8s after a
+context reset must still reveal (green-screen-fuj).")
+
+(defun %click-repaint-p (session t0 t1 clicks &optional (area *reveal-area*))
+  "T when a click in [T0,T1] coincides with a large repaint: a raw damage rect
+covering >= AREA of the frame in the same window. A deliberate, view-scale change."
+  (and (some (lambda (lc) (<= t0 (first lc) t1)) clicks)
+       (some (lambda (d)
+               (destructuring-bind (dt x0 y0 x1 y1) d
+                 (and (<= t0 dt t1) (>= (* (- x1 x0) (- y1 y0)) area))))
+             (session-damage session))))
+
 (defun plan-shots (session &key (window *evi-window*))
   "Walk the recording and emit a sparse list of SHOTs. Evidence-driven, with
-establish-first, cooldown, hysteresis, frame-both, and idle-widen."
+establish-first, cooldown, hysteresis, frame-both, reveal, and idle-widen."
   (let* ((dur (session-duration session))
          (dt (/ 1.0 30.0))
          (clicks (%located-clicks session))
@@ -964,6 +1047,7 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
          (cur-start 0.0) (last-move 0.0) (last-strong -1.0e9)
          (last-wide 0.0)                                  ; last time the camera was wide
          (last-context -1.0e9)                            ; last context-change reset time
+         (last-reveal -1.0e9)                             ; last click-repaint reveal time
          (reestablish-p nil)                              ; current shot is a breathe beat
          (cur-reason :establish)                          ; why the current shot was cut
          (pend-cx -9.0) (pend-cy -9.0) (pend-since 0.0))  ; target-dwell tracking
@@ -983,7 +1067,7 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
                  (setf cur-kind kind cur-cx ccx cur-cy ccy cur-z z
                        cur-start tm last-move tm reestablish-p reest cur-reason reason))))
       (loop for tm from 0.0 to dur by dt do
-        (let* ((ev (evidence-at session (max 0.0 (- tm window)) tm clicks))
+        (let* ((ev (evidence-at session (max 0.0 (- tm window)) tm clicks cur-cx cur-cy))
                (strong (remove-if (lambda (c) (< (cand-strength c) *shot-worth*)) ev))
                (primary (first strong))
                ;; retention: strongest evidence still near the CURRENT centre
@@ -1003,11 +1087,28 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
               (setf pend-cx (cand-cx primary) pend-cy (cand-cy primary) pend-since tm)))
           (when (eq cur-kind :overview) (setf last-wide tm))   ; track time spent wide
           (let ((held (>= (- tm last-move)                      ; cooldown elapsed?
-                          (if reestablish-p *shot-reestablish-hold* *shot-min-hold*)))
+                          ;; A scene-change wide (context reset / reveal) LINGERS so
+                          ;; the viewer takes in the new page before the camera dives
+                          ;; back in -- much longer than a normal cut or a breath beat
+                          ;; (green-screen-fuj: 'zoom out, then don't go back in for a
+                          ;; while').
+                          (cond (reestablish-p *shot-reestablish-hold*)
+                                ((member cur-reason '(:context :reveal)) *shot-establish-hold*)
+                                (t *shot-min-hold*))))
                 (dwelled (>= (- tm pend-since) *shot-commit-dwell*)))  ; target settled?
             (cond
               ;; scrolling: hold the viewport steady, do not react (G8/G11).
               ((%scrolling-p session (max 0.0 (- tm window)) tm) nil)
+              ;; click-driven page-scale repaint (browser navigation, a full panel):
+              ;; the whole view changed on purpose -- reveal it WIDE and never punch
+              ;; into the click. Fires from Overview too (re-holds wide, so the
+              ;; establish push-in is suppressed for min-hold), looking slightly ahead
+              ;; since the repaint follows the click. Once per cooldown (fuj).
+              ((and (> (- tm last-reveal) *reveal-cooldown*)
+                    (%click-repaint-p session (max 0.0 (- tm window))
+                                      (+ tm *reveal-repaint-lookahead*) clicks))
+               (setf last-reveal tm)
+               (switch tm :overview 0.5 0.5 *shot-overview* nil :reveal))
               ;; context change (page nav / window / app / workspace): RESET wide to
               ;; re-establish before the next task. Fires only from a close shot we've
               ;; held, and at most once per *context-reset-cooldown* -- so a burst of
@@ -1017,7 +1118,15 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
                     (> (- tm last-context) *context-reset-cooldown*)
                     (%context-change-p session (max 0.0 (- tm window)) tm))
                (setf last-context tm)
-               (switch tm :overview 0.5 0.5 *shot-overview* t :context))
+               (switch tm :overview 0.5 0.5 *shot-overview* nil :context))
+              ;; reveal: a large new element (dialog / menu / panel) appeared away
+              ;; from the tight shot -- global-dim + hysteresis would leave the camera
+              ;; frozen on the old spot, so override and widen to Overview to show the
+              ;; whole thing. Gated by min-hold; distinct from a big ls in the SAME
+              ;; place (that stays put, %reveal-candidate's distance test) (fuj).
+              ((and held (not (eq cur-kind :overview))
+                    (%reveal-candidate ev cur-cx cur-cy))
+               (switch tm :overview 0.5 0.5 *shot-overview* nil :reveal))
               ;; idle beat: widen to Overview only once we've held the current shot,
               ;; activity has been gone a while, AND nothing resumes soon (no snap).
               ((and held (null strong) (not (eq cur-kind :overview))
@@ -1058,8 +1167,23 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
                    ;; clamp the target to the edge-guard BEFORE deciding it moved,
                    ;; so activity that clamps to the same frame isn't re-cut forever.
                    (let* ((half (min 0.5 (/ 0.5 (max 1.0 z))))
-                          (ncx (min (- 1.0 half) (max half (* 0.5 (+ x0 x1)))))
-                          (ncy (min (- 1.0 half) (max half (* 0.5 (+ y0 y1))))))
+                          ;; Reading-anchor damage (green-screen-pxi): put the window's
+                          ;; top-left near the activity's top-left, so line-starts and
+                          ;; the context above stay in frame instead of centering on the
+                          ;; centroid (which crops the left/top and dives into the middle
+                          ;; of a big repaint). Clicks are precise -> always centered.
+                          (reading (and (eq *damage-anchor* :reading) (not allow-detail)))
+                          (m   (* half *zoom-fit-margin*))   ; small inset off the edge
+                          ;; Pull the frame toward the screen top-left as far as
+                          ;; possible while still showing the activity's far corner
+                          ;; (x1,y1) -- so the left column / line-starts and the
+                          ;; context above stay in view, with the activity sitting
+                          ;; toward the lower-right of the frame. max/min then pins
+                          ;; to the screen edge-guard. :center keeps the old centroid.
+                          (tx  (if reading (- (+ x1 m) half) (* 0.5 (+ x0 x1))))
+                          (ty  (if reading (- (+ y1 m) half) (* 0.5 (+ y0 y1))))
+                          (ncx (min (- 1.0 half) (max half tx)))
+                          (ncy (min (- 1.0 half) (max half ty))))
                      (cond
                        ;; establish-first: from Overview, push in once we've held
                        ;; the establishing shot long enough and the target settled.

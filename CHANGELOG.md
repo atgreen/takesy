@@ -4,6 +4,26 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Calmer, reason-driven auto-zoom camera.** A batch of director fixes from real
+  screencast feedback:
+  - **Holds the zoom through pauses.** It no longer widens to Overview on every
+    thinking pause and punches back in — mid-task pauses hold the shot, and the
+    camera never breathes out on a timer; wide moments come only from a real reason.
+  - **Reveals big changes.** A dialog/menu appearing away from the shot, or a click
+    that repaints much of the screen (e.g. a browser navigation), now widens to show
+    the whole thing instead of staying zoomed in the corner.
+  - **Scene-change wides linger.** After a page/context change the camera stays wide
+    long enough to take the new view in, rather than diving straight back to detail.
+  - **Reading-anchored framing.** Screen activity is framed keeping the left column /
+    line-starts and the context above in view, instead of centring on the change and
+    cropping it — tunable with `--damage-anchor reading|center`.
+  - **Anticipation scales with distance.** A far-away click gets a longer lead so the
+    camera settles before it lands.
+
 ## [1.4.1] - 2026-09-03
 
 ### Changed

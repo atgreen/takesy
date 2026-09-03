@@ -164,6 +164,9 @@ capture-options already carries --webcam (so it isn't declared twice)."
                         :long-name "ripple-intensity" :initial-value "1.6" :key :ripple-intensity)
    (clingon:make-option :string :description "camera style: calm (tutorial, default) or energetic (promo); recordings over 5min force calm"
                         :long-name "style" :initial-value "calm" :key :style)
+   (clingon:make-option :choice :description "how the camera frames screen activity: reading (keep the left column/top context, default) or center (center on the change)"
+                        :long-name "damage-anchor" :items '("reading" "center")
+                        :initial-value "reading" :key :damage-anchor)
    (clingon:make-option :boolean :description "reduced-motion: cut between shots instead of animating pans/zooms (accessibility)"
                         :long-name "reduced-motion" :initial-value :false :key :reduced-motion)
    (clingon:make-option :boolean :description "print the motion-linter report (shot reasons + best-practice warnings)"
@@ -247,6 +250,8 @@ capture-options already carries --webcam (so it isn't declared twice)."
                                  (cond ((string= s "energetic") :energetic)
                                        (t :calm)))
             :reduced-motion    (%truthy (g :reduced-motion))
+            :damage-anchor     (if (string= (string-downcase (or (g :damage-anchor) "reading")) "center")
+                                   :center :reading)
             :lint              (%truthy (g :lint))
             :audio-offset      (%float (g :audio-offset) 0.0)
             :webcam-offset     (%float (g :webcam-offset) 0.0)
