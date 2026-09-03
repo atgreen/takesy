@@ -4,6 +4,30 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Self-calibrating A/V sync (clapperboard).** The count-in "go" tone is now
+  played *into* the recorded audio and detected there at render time, so the audio
+  track is aligned to the picture from a real marker instead of the old
+  `audio_duration − video_span` estimate (which over-trimmed and made the audio
+  drift). Falls back to the estimate when a capture has no tone.
+- **`--webcam-offset S`** — signed webcam-PiP sync nudge (`+` pushes the inset
+  later), mirroring `--audio-offset`. Normally unneeded; the webcam lead is aligned
+  automatically.
+
+### Fixed
+
+- **Audio no longer starts slightly early.** The small, consistent ffplay
+  playback latency the clapperboard leaves behind is now calibrated
+  (`*sync-beep-latency*` = 0.15s), so recordings are audio-aligned out of the box.
+- **Webcam picture-in-picture now lines up with the picture.** Its lead is measured
+  tail-free from the capture clock, instead of `duration − span` — which folded the
+  webcam's post-stop tail into the front trim and pushed the inset out of sync.
+- Both `--audio-offset` and `--webcam-offset` are now documented in the README
+  options table (`--audio-offset` was previously undocumented).
+
 ## [1.3.9] - 2026-09-01
 
 ### Changed

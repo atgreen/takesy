@@ -683,10 +683,14 @@ its STREAM, then %CLOSE-FRAME-ENCODER to finalize."
                                      "[b][p]paletteuse=dither=bayer:diff_mode=rectangle")
                                     path))
                       (append input
-                              ;; -ss before -i seeks the audio input, dropping its
-                              ;; pre-first-frame lead so it lines up with the video.
+                              ;; AUDIO-OFFSET is the net front adjustment (s), SIGNED:
+                              ;; > 0 seeks the audio input (-ss), dropping that much
+                              ;; pre-first-frame lead so it lines up (audio EARLIER);
+                              ;; < 0 delays the audio (-itsoffset) so it plays LATER.
                               (when (and mux (> audio-offset 0.01))
                                 (list "-ss" (format nil "~,3F" audio-offset)))
+                              (when (and mux (< audio-offset -0.01))
+                                (list "-itsoffset" (format nil "~,3F" (- audio-offset))))
                               (when mux (list "-i" (namestring mux)))
                               (list "-c:v" encoder)
                               (%quality-flags encoder width height fps)
@@ -999,6 +1003,7 @@ a circle); BORDER-W is the border width px (0 = none) in colour BORDER (r g b). 
                                    (cursor-size nil)
                                    (bg-image nil) (bg-blur nil)
                                    (clicks nil) (ripple-color '(1.0 1.0 1.0))
+                                   (ripple-intensity 1.6)
                                    (webcam-fn nil) (webcam-dims nil)
                                    (webcam-pos :br) (webcam-size 0.22)
                                    (webcam-corner 1.0)
@@ -1052,9 +1057,15 @@ and updated each frame."
              (wc-cy (ecase webcam-pos
                       ((:br :bl) (- out-h wc-margin wc-half))
                       ((:tr :tl) (+ wc-margin wc-half))))
-             (rip-dur   0.5)                    ; ripple lifetime, seconds
-             (rip-max-r (* out-h 0.07))         ; peak ring radius, px
-             (rip-thick (* out-h 0.010))        ; ring thickness, px
+             ;; Ripple prominence scales with RIPPLE-INTENSITY (1.0 = the original
+             ;; subtle look; the default 1.6 is bolder). Intensity drives opacity and
+             ;; ring thickness directly, and nudges radius and lifetime up a little so
+             ;; a click reads clearly without dominating (green-screen-wyo).
+             (rip-int   (max 0.0 (float ripple-intensity 1.0)))
+             (rip-dur   (* 0.5 (+ 0.7 (* 0.3 rip-int))))  ; lifetime, s (lingers a bit)
+             (rip-max-r (* out-h 0.07 (+ 0.6 (* 0.4 rip-int)))) ; peak ring radius, px
+             (rip-thick (* out-h 0.010 rip-int))           ; ring thickness, px
+             (rip-alpha (min 0.95 (* 0.55 rip-int)))       ; peak opacity
              (press-dur 0.12)                   ; cursor press-scale window, s
              (vao      (make-fullscreen-quad))
              (tex      (make-texture-rgba (funcall frame-fn 0) source-width source-height
@@ -1101,10 +1112,19 @@ and updated each frame."
                                (multiple-value-bind (px py vis)
                                    (cursor-output-px cuv frame out-w out-h content-aspect)
                                  (when vis
-                                   (draw-ripple ripple-prog vao px py
-                                                (* prog rip-max-r) rip-thick
-                                                (* (- 1.0 prog) 0.55) ripple-color
-                                                frame out-w out-h)))))))))
+                                   (let ((r (* prog rip-max-r))
+                                         (fade (- 1.0 prog)))
+                                     ;; Dark halo first (thicker, lower alpha): gives the
+                                     ;; bright ring an outline so it stays visible on light
+                                     ;; UIs, where a bare white ring washes out (green-screen-wyo).
+                                     (draw-ripple ripple-prog vao px py
+                                                  r (* rip-thick 2.2)
+                                                  (* fade rip-alpha 0.5) '(0.0 0.0 0.0)
+                                                  frame out-w out-h)
+                                     (draw-ripple ripple-prog vao px py
+                                                  r rip-thick
+                                                  (* fade rip-alpha) ripple-color
+                                                  frame out-w out-h))))))))))
                    (when cursor-fn
                      (let ((cuv (funcall cursor-fn i))
                            ;; press feedback: briefly scale the cursor down on a click

@@ -36,6 +36,9 @@
            #:*zoom-level* #:*zoom-min* #:*zoom-lead* #:*zoom-tail* #:*zoom-merge-gap*
            #:*track* #:*cursor-contain* #:*cursor-window* #:*cursor-margin*
            #:*cursor-relax* #:*camera-cursor-tau*
+           #:*camera-style* #:*long-form-seconds* #:apply-camera-style #:resolve-camera-style
+           #:apply-resolution-cap #:*shot-overview* #:*shot-working* #:*shot-detail*
+           #:*reduced-motion* #:lint-camera-plan
            #:*damage-include-radius* #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -472,9 +475,12 @@ a typing caret, tiny but repeated) qualifies while a lone one-frame blink/twitch
 does not. This is the twitch gate, on accumulation rather than area.")
 (defparameter *evi-cluster* 0.14
   "UV radius (sum-of-axes) within which damage rects merge into one region.")
-(defparameter *evi-click-lead* 0.45
+(defparameter *evi-click-lead* 0.8
   "Seconds BEFORE a click that its evidence begins -- lets the planner start moving
-early so the destination is framed when the click lands (anticipation).")
+early so the move SETTLES before the action, not after it (audit: introduce -> move
+-> settle -> action -> hold; 'do not wait for a click and then zoom to it'). Calm
+leads by ~move-duration + a settle margin; Energetic leads less (akn.7). The commit-
+dwell gate still prevents committing to a target the pointer only passes through.")
 (defparameter *evi-click-hold* 1.1
   "Seconds AFTER a click that its (strong) evidence persists.")
 (defparameter *evi-cursor-weight* 0.12
@@ -487,12 +493,28 @@ and its strength is halved -- prefer sustained localized activity over a big was
 (defstruct (cand (:constructor make-cand (cx cy x0 y0 x1 y1 strength kind)))
   cx cy x0 y0 x1 y1 strength kind)   ; kind: :click :damage :cursor
 
+(defparameter *click-burst-gap* 0.4
+  "Consecutive clicks within this many seconds AND *click-burst-radius* of the last
+kept click are a BURST -- a double-click, rapid repeats, or hammering one control /
+table row -- and collapse into a single evidence event. One move per task step, not
+per click (akn.5).")
+(defparameter *click-burst-radius* 0.05
+  "UV radius (sum-of-axes) within which clustered clicks collapse (see *click-burst-gap*).")
+
 (defun %located-clicks (session)
-  "Each captured click time positioned by the cursor track: list of (t cx cy) UV."
-  (let ((w (session-width session)) (h (session-height session)))
-    (loop for tc in (session-clicks session)
-          collect (multiple-value-bind (x y) (cursor-at session tc)
-                    (list (float tc 1.0) (/ x w) (/ y h))))))
+  "Each captured click positioned by the cursor track: list of (t cx cy) UV, with
+double-clicks and rapid same-spot bursts collapsed to a single event so a burst
+earns one move, not one per click (akn.5)."
+  (let ((w (session-width session)) (h (session-height session))
+        (kept '()) (lt nil) (lx nil) (ly nil))
+    (dolist (tc (session-clicks session) (nreverse kept))
+      (multiple-value-bind (x y) (cursor-at session tc)
+        (let ((cx (/ x w)) (cy (/ y h)))
+          (unless (and lt (<= (- tc lt) *click-burst-gap*)
+                       (<= (+ (abs (- cx lx)) (abs (- cy ly))) *click-burst-radius*))
+            (push (list (float tc 1.0) cx cy) kept)   ; a fresh event: anchor here
+            (setf lx cx ly cy))
+          (setf lt tc))))))                            ; always advance the burst window
 
 (defun %damage-regions (session t0 t1 &key (max-rect *damage-max-rect*))
   "Cluster localized damage in [T0,T1] into regions (greedy, by centre proximity),
@@ -568,17 +590,37 @@ call). Clicks outrank damage; a bare cursor is a weak last resort."
 ;;; co-active regions together, and widen only on a real idle beat.
 ;;; ==================================================================
 
+;;; Shot vocabulary + pacing. DEFAULTS are the CALM / tutorial preset (green-screen-
+;;; akn): a calm first edit for long-form demos, where camera movement is an
+;;; instructional cue, not decoration. APPLY-CAMERA-STYLE flips these to the
+;;; ENERGETIC preset for short promo-style clips. Audit targets (long-form): 2-4
+;;; reframes/min, coherent shots 8-20s, close-ups >=3-4s, detail zoom 1.5-1.75x.
 (defparameter *shot-overview* 1.0 "Overview shot size: whole frame; context / between tasks.")
-(defparameter *shot-working* 1.4 "Working shot size: the normal focused view.")
-(defparameter *shot-detail* 1.9 "Detail shot size: small controls / brief precision work.")
-(defparameter *shot-min-hold* 2.0
+(defparameter *shot-working* 1.4 "Working shot size: the normal focused view (audit typical 1.25-1.5x).")
+(defparameter *shot-detail* 1.6
+  "Detail shot size: small controls / brief precision work. Calm keeps this in the
+audit's 1.5-1.75x 'strong detail' band (was 1.9x); a resolution-aware cap may lower
+it further so text never enlarges past captured pixels (akn.4).")
+(defparameter *shot-min-hold* 3.5
   "Minimum seconds to hold a shot before any new move (cooldown). Gives the viewer
-time to orient and read; enforces one move per beat, not per input event.")
-(defparameter *shot-hysteresis* 1.5
-  "To LEAVE the current shot a rival target's evidence must exceed the evidence
-still holding the current frame by this factor. Asymmetry prevents oscillation.")
-(defparameter *shot-idle-widen* 1.5
+time to orient and read; enforces one move per BEAT, not per input event. Calm sets
+this to the audit's 3-4s minimum-useful-close-up so shots are long and few (akn.1).")
+(defparameter *shot-hysteresis* 2.0
+  "To LEAVE the current shot a rival target's evidence must exceed the evidence still
+holding the current frame by this factor. Asymmetry prevents oscillation; a high
+calm value resists per-click cutting (anti-yo-yo, akn.1).")
+(defparameter *shot-idle-widen* 2.5
   "Seconds with no worthwhile evidence before widening to Overview (a new beat).")
+(defparameter *shot-reestablish-after* 15.0
+  "Seconds the camera may stay continuously zoomed in before it RE-ESTABLISHES --
+returns to Overview for a brief breath so the viewer re-orients, then pushes back
+into the work. Calm holds work far longer between breaths (was 6s) so stillness
+dominates; the breath itself is short (*shot-reestablish-hold*). Good screencasts
+breathe, but rarely (green-screen-cjx / akn.9).")
+(defparameter *shot-reestablish-hold* 1.5
+  "Seconds a RE-ESTABLISH overview beat holds before pushing back into the work. Kept
+short so the breath reads as a quick re-orientation, not a destination the camera
+parks at -- unlike a normal shot it does NOT inherit the full *shot-min-hold* (akn.9).")
 (defparameter *shot-worth* 0.25
   "Minimum candidate strength worth leaving Overview / taking a close view for.")
 (defparameter *shot-both-radius* 0.45
@@ -586,9 +628,15 @@ still holding the current frame by this factor. Asymmetry prevents oscillation."
 shot rather than alternated between.")
 (defparameter *shot-establish* 1.0
   "Hold the opening Overview at least this long before the first close view.")
-(defparameter *shot-move-eps* 0.12
+(defparameter *shot-move-eps* 0.14
   "Centre must shift more than this (UV, sum-of-axes) to count as a real reframe.")
-(defparameter *shot-commit-dwell* 0.7
+(defparameter *shot-dead-zone* 0.7
+  "Anti-yo-yo dead zone: if a new target already sits within this fraction of the
+current frame's half-size from centre, it is ALREADY comfortably visible, so the
+camera holds the shot instead of re-framing. This is what lets several clicks /
+typing / state-changes happen inside ONE stable shot -- the audit's core long-form
+rule -- rather than a cut per interaction (akn.1).")
+(defparameter *shot-commit-dwell* 1.0
   "A new target must remain the dominant one for this long before the camera moves
 to it. A brief flash -- a <1s repaint, popup, or result panel elsewhere -- never
 persists long enough to earn a cut, so the camera stays on the task instead of
@@ -602,14 +650,15 @@ actually goes during the hold makes the director pick a shot wide enough to HOLD
 work, so the camera sits still instead. ~one hold (*shot-min-hold*) is the horizon we
 can commit to; containment covers anything beyond (green-screen-cjx / g9f).")
 
-(defstruct (shot (:constructor make-shot (t0 t1 kind cx cy zoom)))
-  t0 t1 kind cx cy zoom)
+(defstruct (shot (:constructor make-shot (t0 t1 kind cx cy zoom &optional reason)))
+  t0 t1 kind cx cy zoom
+  (reason nil))   ; why this shot was cut: :establish :push-in :reframe :idle :breathe :context
 
 ;;; Motion timing (Phase 3). Transitions are single composed gestures with
 ;;; ease-in/out; duration scales with distance (a bit, not proportionally).
-(defparameter *move-dur-small* 0.45  "Small reframe duration (s) (G7 350-550ms).")
-(defparameter *move-dur-normal* 0.70 "Normal pan/zoom duration (s) (G7 550-850ms).")
-(defparameter *move-dur-large* 0.95  "Large transition duration (s) (G7 800-1100ms).")
+(defparameter *move-dur-small* 0.50  "Small reframe duration (s) (audit 450-700ms).")
+(defparameter *move-dur-normal* 0.65 "Normal pan/zoom duration (s) (audit 450-700ms).")
+(defparameter *move-dur-large* 0.85  "Large transition duration (s); a bit over the 700ms typical, warranted by distance.")
 (defparameter *move-small-mag* 0.15  "Centre shift (UV sum) below which a move is small.")
 (defparameter *move-large-mag* 0.50  "Centre shift (UV sum) above which a move is large.")
 (defparameter *move-far-spans* 1.0
@@ -622,10 +671,74 @@ engaged, so only genuinely large jumps establish wide first (G7/G11). The old ra
 sum-of-axes threshold (0.50) fired on a mere 0.68-span move and pulled all the way
 out to the desktop for continuous same-area work (green-screen-g9f). Soft band is
 ~0.9-1.1; a progressive partial dip would remove the cliff entirely (g9f follow-up).")
-(defparameter *move-dur-through* 1.5
+(defparameter *move-dur-through* 1.3
   "Duration (s) of a widen-through-Overview transition. Longer than *move-dur-large*
 because it is really TWO gestures (zoom out, then in): a single large-move budget
 forced both phases to ~2x speed, which read as a whip at 4-5s (green-screen-g9f).")
+
+;;; ------------------------------------------------------------------
+;;; Camera style presets (green-screen-akn.2). CALM/tutorial is the product default
+;;; for long-form demos -- a calm first edit the user can occasionally intensify.
+;;; ENERGETIC/promo is an explicit opt-in for short teaser-style clips. The style
+;;; sets the pacing/zoom/breathing tunables above; APPLY-CAMERA-STYLE is called once
+;;; per render before planning. Auto-selection forces CALM for long recordings.
+(defparameter *camera-style* :calm
+  "Active camera style: :calm (tutorial default) or :energetic (promo opt-in).")
+(defparameter *reduced-motion* nil
+  "When true, render a REDUCED-MOTION timeline (akn.3, W3C animation guidance): the
+shot PLAN is unchanged, but transitions become direct CUTS instead of animated
+pans/zooms, and cursor-containment stops drifting the frame. Emphasis then comes
+from the cursor / ripples, not camera movement -- for motion-sensitive viewers.")
+(defparameter *long-form-seconds* 300.0
+  "Recordings at least this long are treated as long-form: CALM is forced regardless
+of the requested style, per the audit (calm default for >~5min).")
+
+(defun apply-camera-style (style)
+  "Set the pacing / zoom / breathing tunables for STYLE (:calm or :energetic). CALM
+follows the long-form cinematography audit (fewer, longer, calmer shots); ENERGETIC
+restores the livelier short-clip behaviour. Returns the style applied."
+  (ecase style
+    (:calm
+     (setf *shot-working* 1.4   *shot-detail* 1.6
+           *shot-min-hold* 3.5  *shot-hysteresis* 2.0  *shot-idle-widen* 4.5
+           *shot-commit-dwell* 1.0 *shot-move-eps* 0.14 *shot-dead-zone* 0.7
+           ;; Breathe rarely: a fixed timer that fires every 15s produced an in-out-
+           ;; in-out yo-yo on longer clips. Hold the work region far longer; context
+           ;; changes and genuine lulls provide most wide moments (akn.9, 1:12-1:27).
+           *shot-reestablish-after* 30.0 *shot-reestablish-hold* 1.5
+           *evi-click-lead* 0.8
+           *move-dur-small* 0.50 *move-dur-normal* 0.65 *move-dur-large* 0.85
+           *move-dur-through* 1.3))
+    (:energetic
+     (setf *shot-working* 1.4   *shot-detail* 1.9
+           *shot-min-hold* 2.0  *shot-hysteresis* 1.5  *shot-idle-widen* 1.5
+           *shot-commit-dwell* 0.7 *shot-move-eps* 0.12 *shot-dead-zone* 0.5
+           *shot-reestablish-after* 8.0 *shot-reestablish-hold* 2.0
+           *evi-click-lead* 0.5
+           *move-dur-small* 0.45 *move-dur-normal* 0.70 *move-dur-large* 0.95
+           *move-dur-through* 1.5)))
+  (setf *camera-style* style))
+
+(defun resolve-camera-style (requested duration)
+  "Pick the effective style: long-form (>= *long-form-seconds*) forces :calm; else the
+REQUESTED style (defaulting to :calm). Returns (values style forced-p)."
+  (let ((req (or requested :calm)))
+    (if (and duration (>= duration *long-form-seconds*) (not (eq req :calm)))
+        (values :calm t)
+        (values req nil))))
+
+(defun apply-resolution-cap (cap)
+  "Limit the DETAIL zoom so a close-up doesn't enlarge the source far past its native
+pixels -- which softens text and UI edges (akn.4, TechSmith). CAP is the available
+crop headroom = capture-height / delivery-height (>= 1). A 4K capture delivered at
+1080p gives ~2x; a near-native delivery gives ~1x. We only tighten DETAIL, and never
+below WORKING: on a low-headroom capture, mild softening at the working zoom is far
+better UX than disabling auto-zoom entirely (which an aggressive cap did). Returns
+the applied cap."
+  (let ((c (max 1.0 (float cap 1.0))))
+    (when (< c *shot-detail*)
+      (setf *shot-detail* (max *shot-working* c)))
+    c))
 
 ;;; Cursor containment (Phase 3b). Clicks and localized activity choose the shot,
 ;;; but a zoomed frame can let the pointer slide off-screen. Keep it in view by
@@ -820,6 +933,26 @@ scrolling / a large repaint. Such damage never forms a target (it exceeds
                 (session-damage session))
       *scroll-min-rects*))
 
+(defparameter *context-change-area* 0.85
+  "UV area a single damage rect must cover to read as a CONTEXT CHANGE -- a page
+navigation, window switch, or new application/workspace -- as opposed to local
+editing. Raised so an ordinary in-app content refresh (which leaves the chrome
+intact) doesn't trip it; only a near-total repaint does (akn.6).")
+(defparameter *context-reset-cooldown* 20.0
+  "Seconds a RESET-to-wide suppresses further context-change resets. A burst of
+navigation (loading a page, clicking through a few views of the SAME task) would
+otherwise pull the camera wide again and again -- the in-out-in-out yo-yo. One
+reset marks the transition; the ensuing work then plays in a held shot (akn.6).")
+
+(defun %context-change-p (session t0 t1)
+  "T when [T0,T1] contains a near-full-frame damage rect: a task/window/app change
+that warrants an establishing RESET to Overview (akn.6)."
+  (some (lambda (d)
+          (destructuring-bind (dt x0 y0 x1 y1) d
+            (and (<= t0 dt t1)
+                 (>= (* (- x1 x0) (- y1 y0)) *context-change-area*))))
+        (session-damage session)))
+
 (defun plan-shots (session &key (window *evi-window*))
   "Walk the recording and emit a sparse list of SHOTs. Evidence-driven, with
 establish-first, cooldown, hysteresis, frame-both, and idle-widen."
@@ -829,20 +962,26 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
          (shots '())
          (cur-kind :overview) (cur-cx 0.5) (cur-cy 0.5) (cur-z 1.0)
          (cur-start 0.0) (last-move 0.0) (last-strong -1.0e9)
+         (last-wide 0.0)                                  ; last time the camera was wide
+         (last-context -1.0e9)                            ; last context-change reset time
+         (reestablish-p nil)                              ; current shot is a breathe beat
+         (cur-reason :establish)                          ; why the current shot was cut
          (pend-cx -9.0) (pend-cy -9.0) (pend-since 0.0))  ; target-dwell tracking
     (labels ((emit (endt)
-               (push (make-shot cur-start (max cur-start endt) cur-kind cur-cx cur-cy cur-z)
+               (push (make-shot cur-start (max cur-start endt) cur-kind cur-cx cur-cy cur-z
+                                cur-reason)
                      shots))
-             (switch (tm kind cx cy z)
+             (switch (tm kind cx cy z &optional reest (reason :reframe))
                ;; Edge-guard (G8): clamp the centre so the frame stays inside the
                ;; content -- no black bars, and the focused area never sits under a
-               ;; crop edge.
+               ;; crop edge. REEST marks a re-establish breathe beat, which holds only
+               ;; briefly (*shot-reestablish-hold*) rather than the full min-hold.
                (let* ((half (min 0.5 (/ 0.5 (max 1.0 z))))
                       (ccx (min (- 1.0 half) (max half cx)))
                       (ccy (min (- 1.0 half) (max half cy))))
                  (emit tm)
                  (setf cur-kind kind cur-cx ccx cur-cy ccy cur-z z
-                       cur-start tm last-move tm))))
+                       cur-start tm last-move tm reestablish-p reest cur-reason reason))))
       (loop for tm from 0.0 to dur by dt do
         (let* ((ev (evidence-at session (max 0.0 (- tm window)) tm clicks))
                (strong (remove-if (lambda (c) (< (cand-strength c) *shot-worth*)) ev))
@@ -862,17 +1001,36 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
                            (abs (- (cand-cy primary) pend-cy)))
                         *shot-move-eps*)
               (setf pend-cx (cand-cx primary) pend-cy (cand-cy primary) pend-since tm)))
-          (let ((held (>= (- tm last-move) *shot-min-hold*))    ; cooldown elapsed?
+          (when (eq cur-kind :overview) (setf last-wide tm))   ; track time spent wide
+          (let ((held (>= (- tm last-move)                      ; cooldown elapsed?
+                          (if reestablish-p *shot-reestablish-hold* *shot-min-hold*)))
                 (dwelled (>= (- tm pend-since) *shot-commit-dwell*)))  ; target settled?
             (cond
               ;; scrolling: hold the viewport steady, do not react (G8/G11).
               ((%scrolling-p session (max 0.0 (- tm window)) tm) nil)
+              ;; context change (page nav / window / app / workspace): RESET wide to
+              ;; re-establish before the next task. Fires only from a close shot we've
+              ;; held, and at most once per *context-reset-cooldown* -- so a burst of
+              ;; navigation within one task doesn't yo-yo the camera in-out-in-out
+              ;; (akn.6; the 1:12-1:27 problem).
+              ((and held (not (eq cur-kind :overview))
+                    (> (- tm last-context) *context-reset-cooldown*)
+                    (%context-change-p session (max 0.0 (- tm window)) tm))
+               (setf last-context tm)
+               (switch tm :overview 0.5 0.5 *shot-overview* t :context))
               ;; idle beat: widen to Overview only once we've held the current shot,
               ;; activity has been gone a while, AND nothing resumes soon (no snap).
               ((and held (null strong) (not (eq cur-kind :overview))
                     (>= (- tm last-strong) *shot-idle-widen*)
                     (not (%activity-ahead-p session tm (+ tm *shot-min-hold*) clicks)))
-               (switch tm :overview 0.5 0.5 *shot-overview*))
+               (switch tm :overview 0.5 0.5 *shot-overview* nil :idle))
+              ;; re-establish beat: after a long continuous stretch zoomed in, breathe
+              ;; back to Overview so the viewer re-orients, then establish-first pushes
+              ;; back into the work. Gated by min-hold so it never cuts a fresh shot.
+              ;; Flagged as a beat so it holds only briefly (a breath, not a park).
+              ((and held (not (eq cur-kind :overview))
+                    (> (- tm last-wide) *shot-reestablish-after*))
+               (switch tm :overview 0.5 0.5 *shot-overview* t :breathe))
               ;; a target worth a close view
               (primary
                ;; frame-both: fold in a 2nd strong candidate that's nearby
@@ -907,19 +1065,84 @@ establish-first, cooldown, hysteresis, frame-both, and idle-widen."
                        ;; the establishing shot long enough and the target settled.
                        ((eq cur-kind :overview)
                         (when (and held dwelled (>= tm *shot-establish*))
-                          (switch tm kind ncx ncy z)))
+                          (switch tm kind ncx ncy z nil :push-in)))
                        ;; already close: move only past the cooldown and when the new
-                       ;; target clearly beats what's holding the current frame
+                       ;; target clearly beats what's holding the current frame -- AND
+                       ;; only when the target isn't already comfortably in frame.
                        (t
-                        (let ((moved (> (+ (abs (- ncx cur-cx)) (abs (- ncy cur-cy)))
-                                        *shot-move-eps*))
-                              (resized (not (eq kind cur-kind))))
-                          (when (and held dwelled (or moved resized)
+                        (let* ((cur-half (min 0.5 (/ 0.5 (max 1.0 cur-z))))
+                               ;; anti-yo-yo: the target already sits inside the current
+                               ;; frame's dead zone -> it's visible, hold the shot so a
+                               ;; whole local task plays in ONE stable shot (akn.1).
+                               (in-frame (and (<= (abs (- ncx cur-cx)) (* cur-half *shot-dead-zone*))
+                                              (<= (abs (- ncy cur-cy)) (* cur-half *shot-dead-zone*))))
+                               (moved (> (+ (abs (- ncx cur-cx)) (abs (- ncy cur-cy)))
+                                         *shot-move-eps*))
+                               (resized (not (eq kind cur-kind)))
+                               ;; hold when the target is in-frame and no zoom change is
+                               ;; needed -- a pure pan to chase a still-visible subject is
+                               ;; exactly the restlessness to avoid; a zoom change (make
+                               ;; legible) is still allowed.
+                               (pan-only-in-frame (and in-frame (not resized))))
+                          (when (and held dwelled (or moved resized) (not pan-only-in-frame)
                                      (>= (cand-strength primary)
                                          (* *shot-hysteresis* (max ret 0.15))))
                             (switch tm kind ncx ncy z)))))))))))))
       (emit dur)
       (nreverse shots))))
+
+;;; ------------------------------------------------------------------
+;;; Motion linter (akn.8). A post-plan report: flags moves that the audit warns
+;;; against and labels each shot with why it exists. Advisory only -- it inspects
+;;; the same SHOT list the compositor renders, so the numbers match the output.
+(defparameter *lint-min-closeup* 3.0
+  "Close-ups (working/detail) held less than this many seconds are flagged as too
+short to read (audit: minimum useful close-up 3-4s).")
+(defparameter *lint-moves-per-min* 6.0
+  "Reframes/min above this over the clip is flagged as excess motion (audit warn >6).")
+
+(defun %shot-reason (prev shot)
+  "A short human reason for SHOT, from the trigger recorded when it was cut."
+  (declare (ignore prev))
+  (ecase (or (shot-reason shot) :reframe)
+    (:establish "establish — opening context")
+    (:push-in   (format nil "push-in — ~(~A~) on the settled target" (shot-kind shot)))
+    (:reframe   (format nil "reframe — ~(~A~) on a new target" (shot-kind shot)))
+    (:idle      "idle-widen — activity paused, pulled wide")
+    (:breathe   "re-establish — periodic breath, re-orient")
+    (:context   "reset — context change (page/window/app)")))
+
+(defun lint-camera-plan (session &key (stream *standard-output*))
+  "Plan SESSION and print an advisory motion report: per-shot reasons + audit
+warnings (excess density, too-short close-ups, zoom yo-yo). Returns the warnings."
+  (let* ((shots (plan-shots session))
+         (dur   (max 1e-3 (session-duration session)))
+         (nmoves (max 0 (1- (length shots))))
+         (rate  (* 60.0 (/ nmoves dur)))
+         (warns '()))
+    (format stream "~&  [lint] ~D shots over ~,1Fs = ~,1F reframes/min~%" (length shots) dur rate)
+    (when (> rate *lint-moves-per-min*)
+      (push (format nil "excess motion: ~,1F reframes/min (audit calm <=~,1F) -- prefer stillness"
+                    rate *lint-moves-per-min*) warns))
+    ;; per-shot reasons + short close-up flags
+    (loop for (prev shot) on (cons nil shots)
+          while shot
+          for dwell = (- (shot-t1 shot) (shot-t0 shot))
+          do (format stream "  [lint]  ~5,1Fs ~9A z~,2F  ~A~%"
+                     (shot-t0 shot) (shot-kind shot) (shot-zoom shot) (%shot-reason prev shot))
+             (when (and (> (shot-zoom shot) 1.05) (< dwell *lint-min-closeup*))
+               (push (format nil "short close-up at ~,1Fs held only ~,1Fs (audit >=~,1Fs)"
+                             (shot-t0 shot) dwell *lint-min-closeup*) warns)))
+    ;; zoom yo-yo: in/out zoom reversals between consecutive shots
+    (let ((rev 0))
+      (loop for (a b c) on shots while c
+            for d1 = (- (shot-zoom b) (shot-zoom a))
+            for d2 = (- (shot-zoom c) (shot-zoom b))
+            when (< (* d1 d2) -1e-4) do (incf rev))
+      (when (>= rev 3)
+        (push (format nil "zoom yo-yo: ~D in/out reversals -- hold a region for the whole task" rev) warns)))
+    (dolist (w (nreverse warns)) (format stream "  [lint] WARNING: ~A~%" w))
+    warns))
 
 (defun shots->keyframes (session shots
                          &key (padding 0.04) (corner 0.09)
@@ -967,7 +1190,10 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                         ;; clamp d so it fits inside the outgoing shot's hold.
                         (d (when b (min (%move-dur a b)
                                         (max 0.1 (- (shot-t0 b) (shot-t0 a))))))
-                        (in-x (and b (>= tm (- (shot-t0 b) d))))
+                        ;; Reduced motion: no eased transition at all -- hold the
+                        ;; current shot's static framing; the frame CUTS when the shot
+                        ;; index advances at the next t0 (akn.3).
+                        (in-x (and b (not *reduced-motion*) (>= tm (- (shot-t0 b) d))))
                         (uf   (if in-x (/ (- tm (- (shot-t0 b) d)) d) 0.0))
                         ;; A widen-through-Overview move crosses z=1, where
                         ;; %contain-box is discontinuous (it snaps the centre to 0.5).
@@ -998,7 +1224,7 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
                      ;; damped spring EVERY step, so it drifts in gently instead of
                      ;; snapping, and only near the frame edge (green-screen-g9f).
                      (let ((zz (max 1.0 z)) (tdx 0.0) (tdy 0.0) (tdz 0.0))
-                       (when (and *cursor-contain* held)
+                       (when (and *cursor-contain* held (not *reduced-motion*))
                          (multiple-value-bind (kz kx ky) (%contain-box zz cx cy held)
                            (declare (ignore kz))  ; pan only; the director owns the zoom
                            ;; Deadband gate: how far the smoothed pointer sits from the

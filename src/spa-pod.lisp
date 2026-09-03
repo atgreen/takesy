@@ -193,6 +193,18 @@ common 32-bit packed formats over a wide size/framerate range."
                                        28
                                        (* 4 1024 1024)))))))
 
+(defun build-header-meta-pod ()
+  "ParamMeta requesting SPA_META_Header. Its pts is the compositor's capture time
+for each frame -- the frame's true content instant -- which we subtract from the
+arrival time so the picture lines up with audio (green-screen-9z2)."
+  (build-object-pod
+   +spa-type-object-param-meta+ +spa-param-meta+
+   (lambda (buf)
+     (pod-prop buf +spa-param-meta-type+
+               (lambda () (pod-id buf +spa-meta-header+)))
+     (pod-prop buf +spa-param-meta-size+
+               (lambda () (pod-int buf +sz/spa-meta-header+))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Foreign-memory handoff.
 

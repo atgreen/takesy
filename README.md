@@ -147,6 +147,8 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--cursor-hotspot X,Y` | the image's click point, as a fraction of its size | `0,0` (top-left) |
 | `--cursor-size F` | cursor height as a fraction of the output height | `0.06` |
 | `--audio MODE` | record audio: `system` (desktop/monitor), `mic`, or `both` (mixed). Muxed into the mp4 as AAC; set at `capture`/`record` time | off |
+| `--audio-offset S` | A/V sync nudge (seconds, signed); `+` pushes audio **later** to fix audio that leads the picture. Auto-aligned by the count-in clapperboard, so normally `0` | `0` |
+| `--webcam-offset S` | webcam-PiP sync nudge (seconds, signed); `+` pushes the webcam **later**. Auto-aligned from the capture clock, so normally `0` | `0` |
 | `--countdown N` | seconds of 3-2-1 countdown before recording starts; set at `capture`/`record` time | `3` |
 
 ### The camera

@@ -27,6 +27,15 @@
 (defconstant +off/spa-meta/type+ 0)
 (defconstant +off/spa-meta/size+ 4)
 (defconstant +off/spa-meta/data+ 8)
+;; struct spa_meta_header: flags(u64) offset(u32,+pad) pts(i64) dts_offset(i64)
+;; seq(u64). pts is the compositor's capture timestamp in nanoseconds, normally
+;; CLOCK_MONOTONIC -- the frame's true content time (green-screen-9z2).
+(defconstant +sz/spa-meta-header+ 40)
+(defconstant +off/spa-meta-header/flags+ 0)
+(defconstant +off/spa-meta-header/offset+ 8)
+(defconstant +off/spa-meta-header/pts+ 16)
+(defconstant +off/spa-meta-header/dts-offset+ 24)
+(defconstant +off/spa-meta-header/seq+ 32)
 (defconstant +sz/spa-meta-cursor+ 28)
 (defconstant +off/spa-meta-cursor/id+ 0)
 (defconstant +off/spa-meta-cursor/flags+ 4)

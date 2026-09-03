@@ -17,12 +17,24 @@
 ;;; ------------------------------------------------------------------
 ;;; Foreign read helpers.
 
-(declaim (inline ptr+ u32@ i32@ ptr@))
+(declaim (inline ptr+ u32@ i32@ i64@ ptr@))
 (defun ptr+ (p n) (cffi:inc-pointer p n))
 (defun u32@ (p off) (cffi:mem-ref (ptr+ p off) :uint32))
 (defun i32@ (p off) (cffi:mem-ref (ptr+ p off) :int32))
+(defun i64@ (p off) (cffi:mem-ref (ptr+ p off) :int64))
 (defun ptr@ (p off) (cffi:mem-ref (ptr+ p off) :pointer))
 (defun round-up (n m) (* m (ceiling n m)))
+
+;;; CLOCK_MONOTONIC now, in nanoseconds, or NIL on failure. Same clock domain as
+;;; the SPA header pts, so (mono-now - pts) is a frame's capture latency.
+(defconstant +clock-monotonic+ 1)
+(defun %mono-ns ()
+  (ignore-errors
+   (cffi:with-foreign-object (ts :int64 2)   ; timespec {tv_sec; tv_nsec} on LP64
+     (when (zerop (cffi:foreign-funcall "clock_gettime"
+                                        :int +clock-monotonic+ :pointer ts :int))
+       (+ (* (cffi:mem-aref ts :int64 0) 1000000000)
+          (cffi:mem-aref ts :int64 1))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Capture state, shared with the C callbacks via a special var. One capture
@@ -41,6 +53,11 @@
   ;; then, so negotiation latency doesn't shorten the clip -- bead am4.7).
   (record-start nil) (record-duration 0) (record-min-dt 0) (record-last nil)
   (record-budget 0) (max-frames 0) (n-saved 0) (frames '())
+  ;; A/V sync (green-screen-9z2): each frame's :time is its arrival time on the
+  ;; record-start clock, less its capture latency measured from the SPA header
+  ;; pts, so content lands at its true instant. record-last-time keeps the last
+  ;; emitted :time to guard monotonicity; pts-latency logs the first measurement.
+  (record-last-time nil) (pts-logged nil) (pts-latency nil)
   ;; pause/resume (SIGUSR1): while paused, frames aren't saved and paused time is
   ;; excluded from the timeline (record-start is shifted on resume).
   (paused nil) (pause-start nil)
@@ -131,6 +148,18 @@ id /= 0 (valid cursor data)."
                             (i32@ pos +off/spa-point/y+) t id))
                   (values nil nil t id)))))))))
 
+(defun %buffer-pts (spabuf)
+  "Presentation timestamp (ns) from the buffer's SPA_META_Header, or NIL if the
+buffer carries no header meta. This is the compositor's capture time for the
+frame -- its true content instant, before the portal/PipeWire queue latency that
+delays its arrival at this callback (green-screen-9z2)."
+  (let ((n     (u32@ spabuf +off/spa-buffer/n-metas+))
+        (metas (ptr@ spabuf +off/spa-buffer/metas+)))
+    (dotimes (i n nil)
+      (let ((m (ptr+ metas (* i +sz/spa-meta+))))
+        (when (= (u32@ m +off/spa-meta/type+) +spa-meta-header+)
+          (return (i64@ (ptr@ m +off/spa-meta/data+) +off/spa-meta-header/pts+)))))))
+
 ;;; ------------------------------------------------------------------
 ;;; Callbacks.
 
@@ -181,22 +210,27 @@ id /= 0 (valid cursor data)."
           (setf (capture-width *cap*) w (capture-height *cap*) h (capture-format *cap*) fmt)
           (let* ((stride (* w 4))
                  (size (* stride h))
-                 (bufpod nil) (curpod nil) (arr nil))
+                 (bufpod nil) (curpod nil) (hdrpod nil) (arr nil))
             (setf (capture-stride *cap*) stride)
             ;; Allocate under unwind-protect so a signal mid-setup can't leak the
             ;; foreign PODs (green-screen-zqb.5).
             (unwind-protect
                  (progn
+                   ;; Request Buffers + Cursor + Header metas. Header carries the
+                   ;; per-frame pts we use for A/V sync (green-screen-9z2).
                    (setf bufpod (octets->foreign (build-buffers-pod stride size))
                          curpod (octets->foreign (build-cursor-meta-pod))
-                         arr    (cffi:foreign-alloc :pointer :count 2))
+                         hdrpod (octets->foreign (build-header-meta-pod))
+                         arr    (cffi:foreign-alloc :pointer :count 3))
                    (setf (cffi:mem-aref arr :pointer 0) bufpod
-                         (cffi:mem-aref arr :pointer 1) curpod)
+                         (cffi:mem-aref arr :pointer 1) curpod
+                         (cffi:mem-aref arr :pointer 2) hdrpod)
                    (setf (capture-update-rc *cap*)
-                         (pw-stream-update-params (capture-stream *cap*) arr 2)))
+                         (pw-stream-update-params (capture-stream *cap*) arr 3)))
               (when arr    (cffi:foreign-free arr))
               (when bufpod (cffi:foreign-free bufpod))
-              (when curpod (cffi:foreign-free curpod)))
+              (when curpod (cffi:foreign-free curpod))
+              (when hdrpod (cffi:foreign-free hdrpod)))
             (format t "  [pw] negotiated ~Dx~D fmt=~D~%" w h fmt)))
       (serious-condition (e)
         (setf (capture-error *cap*) (format nil "param-changed: ~A" e))
@@ -397,15 +431,53 @@ owns requeuing the buffer, so this never touches it."
          (let* ((i    (capture-n-saved cap))
                 (enc  (capture-enc-stream cap))
                 (path (unless enc
-                        (format nil "~A/frame-~5,'0D.bgrx" (capture-record-dir cap) i))))
+                        (format nil "~A/frame-~5,'0D.bgrx" (capture-record-dir cap) i)))
+                ;; Arrival time on the record-start clock (already pause-corrected).
+                (arel (/ (float (- now (capture-record-start cap)) 1.0d0)
+                         internal-time-units-per-second))
+                ;; This frame's capture latency, from the compositor's pts vs a
+                ;; monotonic read taken here at arrival (green-screen-9z2). Both are
+                ;; CLOCK_MONOTONIC, so their difference is arrival-minus-content.
+                ;; Guard: some sources leave pts 0/unpopulated or in another clock
+                ;; domain -- a latency outside a sane window means "don't trust it",
+                ;; so that frame falls back to the raw arrival time.
+                (pts  (ignore-errors (%buffer-pts spabuf)))
+                (lat  (let ((mono (and pts (plusp pts) (%mono-ns))))
+                        (when mono
+                          (let ((l (/ (float (- mono pts) 1.0d0) 1.0d9)))
+                            (when (<= -0.005d0 l 2.0d0) l)))))
+                ;; Subtract the latency so content lands at its true instant; keep
+                ;; times non-decreasing for the render's ascending-order contract.
+                (raw  (if lat (- arel lat) arel))
+                (prev (capture-record-last-time cap))
+                (tsec (if prev (max raw prev) raw)))
            (if enc                          ; stream to the encoder, else a raw file
                (ignore-errors (write-sequence (%frame->vector dptr coff csize) enc))
                (%write-frame-raw path dptr coff csize))
-           (push (list :i i
-                       :time (/ (float (- now (capture-record-start cap)) 1.0d0)
-                                internal-time-units-per-second)
-                       :cursor-x cx :cursor-y cy :path path)
+           (push (list :i i :time tsec :cursor-x cx :cursor-y cy :path path)
                  (capture-frames cap))
+           (setf (capture-record-last-time cap) tsec)
+           (unless (capture-pts-logged cap)   ; report the sync mode once
+             (setf (capture-pts-logged cap) t (capture-pts-latency cap) lat)
+             (cond
+               (lat
+                (format t "  [pw] A/V sync: SPA header pts -> correcting ~
+                           capture latency (~,1F ms on the first frame)~%"
+                        (* lat 1000.0)))
+               ;; Distinguish the two failure modes so we know how to proceed:
+               ;; nil = the compositor attached no header meta at all; 0 = it
+               ;; attached one but never set pts; else = pts in another clock.
+               ((null pts)
+                (format t "  [pw] A/V sync: no SPA_META_Header attached; ~
+                           frame times use the arrival clock~%"))
+               ((not (plusp pts))
+                (format t "  [pw] A/V sync: SPA_META_Header present but pts=0 ~
+                           (compositor leaves it unset); arrival clock~%"))
+               (t
+                (format t "  [pw] A/V sync: header pts=~D but latency ~,1F ms ~
+                           out of range (foreign clock?); arrival clock~%"
+                        pts (* (/ (float (- (or (%mono-ns) pts) pts) 1.0d0) 1.0d9)
+                               1000.0)))))
            (when cx (setf (capture-cursor-meta-seen cap) t))
            (incf (capture-n-saved cap))
            (setf (capture-record-last cap) now))))
@@ -578,6 +650,7 @@ Return the CAPTURE struct (width/height/format/stride/cursor)."
 (defun record-frames (fd node-id &key (duration nil) (max-fps 30)
                                       (disk-budget nil)
                                       (audio nil)
+                                      (sync-beep-fn nil)
                                       (dir "/tmp/takesy-rec"))
   "Record from NODE-ID into DIR until the user ends the share (stream drops after
 streaming -- cb-state-changed quits the loop) or, when DURATION is non-NIL, that
@@ -612,7 +685,16 @@ Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
                               :record-min-dt
                               (round (/ internal-time-units-per-second (max 1 max-fps)))))
            ;; Parallel audio recorder (best-effort) spanning the capture window.
-           (audio-handle (when audio (takesy/audio:start-audio dir audio))))
+           (audio-handle (when audio (takesy/audio:start-audio dir audio)))
+           ;; A/V sync clapperboard (green-screen-kvi): once the recorder is live,
+           ;; play the 'go' tone INTO the audio and stamp the frame-clock instant it
+           ;; fired. The render finds the tone's onset in audio.wav and, with this
+           ;; stamp and record-start, computes the true pre-roll -- no duration guess.
+           (sync-beep-clock
+             (when (and audio-handle sync-beep-fn)
+               (sleep 0.30)                       ; let the recorder capture first
+               (prog1 (get-internal-real-time)
+                 (ignore-errors (funcall sync-beep-fn))))))
       ;; SIGUSR1 pauses/resumes this capture (kill -USR1 <pid>).
       (ensure-pause-handler)
       (setf *record-cap* cap)
@@ -629,6 +711,13 @@ Return a plist (:width :height :stride :format :fps :dir :frames :audio)."
                     ;; align a parallel pointer-motion track to the frame timeline.
                     :record-start (capture-record-start cap)
                     :time-units internal-time-units-per-second
+                    ;; sync clapperboard: frame-clock instant the 'go' tone fired, and
+                    ;; its frequency, so the render can align audio to video (kvi).
+                    :sync-beep-clock sync-beep-clock
+                    :sync-beep-freq (when sync-beep-clock takesy/audio:*sync-beep-freq*)
+                    ;; measured screen-capture latency folded into frame :time
+                    ;; (green-screen-9z2); NIL when the source gave no usable pts.
+                    :capture-latency (capture-pts-latency cap)
                     :intermediate (capture-intermediate cap)  ; nil if raw fallback
                     ;; stop-audio finalises the wav and validates it has data;
                     ;; NIL when audio was off or produced nothing.

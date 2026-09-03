@@ -13,7 +13,7 @@
                     (#:dir #:takesy/director) (#:comp #:takesy/compositor)
                     (#:kf #:takesy/keyframe)
                     (#:evdev #:takesy/evdev) (#:wc #:takesy/webcam)
-                    (#:li #:takesy/libinput))
+                    (#:li #:takesy/libinput) (#:audio #:takesy/audio))
   (:export #:recording->session #:compute-damage #:compute-content-bbox
            #:compose-recording #:record-to-mp4 #:load-image-rgba
            #:capture-recording #:render-recording #:render-recording-dir))
@@ -91,6 +91,32 @@ rawvideo RGBA. Signals if the file is missing or the byte count doesn't match."
               :output '(:string :stripped t) :ignore-error-status t))
           (d (let ((*read-eval* nil)) (read-from-string s nil nil))))
      (when (realp d) (float d 1.0)))))
+
+(defparameter *sync-beep-latency* 0.15
+  "Seconds the sync tone's SOUND lags its frame-clock stamp: the count-in beep is
+played with ffplay (async), so it emits a little after we record *sync-beep-clock*.
+The clapperboard removes the big, variable stop-skew error; this is the small,
+consistent residual. Measured at ~0.15s on real recordings (audio started ~0.15s
+early with this at 0, and --audio-offset 0.15 fixed it -- green-screen-9z2); it's a
+property of the ffplay->sink path, not the content, so it's stable. Nudge any
+residual per-render with --audio-offset.")
+
+(defun %beep-sync-trim (rec audio)
+  "Trim (seconds) to align AUDIO to the frame timeline using the sync clapperboard
+(green-screen-kvi): the 'go' tone's onset in the wav (found by DETECT-SYNC-BEEP)
+plus how long after the tone the first frame arrived (RECORD-START minus the tone's
+frame-clock stamp), less *sync-beep-latency*. Correct up to that residual, with no
+duration guess. NIL when the recording carries no sync stamp or no tone is found
+(older captures / no audio)."
+  (let ((bc    (getf rec :sync-beep-clock))
+        (rs    (getf rec :record-start))
+        (freq  (getf rec :sync-beep-freq))
+        (units (float (or (getf rec :time-units) internal-time-units-per-second) 1.0d0)))
+    (when (and bc rs freq audio (probe-file audio))
+      (let ((fbeep (ignore-errors (audio:detect-sync-beep audio :freq freq))))
+        (when fbeep
+          (max 0.0 (+ (float fbeep 1.0) (/ (float (- rs bc) 1.0) units)
+                      (- *sync-beep-latency*))))))))
 
 (defun %source-lead (src-path span)
   "Seconds SRC-PATH (a parallel audio/webcam recorder) began BEFORE the screen's
@@ -483,11 +509,13 @@ stretches are easy to spot. Returns the list of (t_out zoom cx cy) samples."
                                             (bg-image nil)
                                             (bg-blur nil)
                                             (clicks nil) (ripple-color '(1.0 1.0 1.0))
+                                            (ripple-intensity 1.6)
                                             (webcam nil) (webcam-pos :br) (webcam-size 0.22)
                                   (webcam-corner 1.0)
                                   (webcam-border 0.012) (webcam-border-color '(1.0 1.0 1.0))
                                   (webcam-zoom 1.0) (webcam-pan-x 0.0) (webcam-pan-y 0.0)
-                                            (audio nil)
+                                            (audio nil) (audio-offset 0.0)
+                                            (webcam-offset 0.0)
                                             (time-warp nil) (out-duration nil)
                                             (aspect nil)
                                             (camera-log nil)
@@ -505,11 +533,24 @@ without an over-large file."
     (destructuring-bind (cx0 cy0 cx1 cy1) crop
       (let* ((span (float (getf (aref frames (1- nsrc)) :time) 1.0))
              ;; PiP/audio sync: the parallel audio & webcam recorders start before
-             ;; the first screen frame, so each carries a pre-roll (= its duration -
-             ;; SPAN, since all sources stop together). Trim that lead off the front
-             ;; so both line up with the picture (green-screen sync bug).
-             (webcam-lead (%source-lead webcam span))
-             (audio-lead  (%source-lead audio span))
+             ;; the first screen frame, so each carries a pre-roll. Trim that lead
+             ;; off the front so both line up with the picture (green-screen sync
+             ;; bug). Prefer the clock-measured webcam pre-roll (:WEBCAM-LEAD,
+             ;; green-screen-9z2) -- it excludes the post-stop tail that the
+             ;; duration - SPAN estimate wrongly folds into the front trim.
+             ;; --webcam-offset (SIGNED) nudges the residual: + pushes the PiP
+             ;; LATER (smaller lead -> earlier webcam content shown later).
+             (webcam-lead (max 0.0 (- (or (getf rec :webcam-lead)
+                                          (%source-lead webcam span))
+                                      (float webcam-offset 1.0))))
+             ;; Auto A/V sync: prefer the SELF-CALIBRATING clapperboard (find the go
+             ;; tone in the recorded audio) and fall back to the fragile duration
+             ;; estimate when there's no sync stamp. Then apply the user's
+             ;; --audio-offset (SIGNED): positive pushes audio LATER (less trim, or a
+             ;; delay past zero), negative EARLIER.
+             (beep-trim   (%beep-sync-trim rec audio))
+             (audio-lead  (- (or beep-trim (%source-lead audio span))
+                             (float audio-offset 1.0)))
              ;; TIME-WARP maps output time -> source time (idle-removal); identity
              ;; otherwise. DUR is the OUTPUT length.
              (warp (or time-warp #'identity))
@@ -536,9 +577,12 @@ without an over-large file."
         (format t "  [record] compositing ~D src frames -> ~D output frames ~
                    (~,1Fs @ ~Dfps) crop ~,2Fx~,2F of frame -> ~Dx~D~@[ +cursor~]~%"
                 nsrc nout dur fps (- cx1 cx0) (- cy1 cy0) ow oh cursor-fn)
-        (when (or (> webcam-lead 0.01) (> audio-lead 0.01))
-          (format t "  [record] PiP sync: trimming ~,2Fs webcam / ~,2Fs audio pre-roll~%"
-                  webcam-lead audio-lead))
+        (when (or (> webcam-lead 0.01) (> (abs audio-lead) 0.01) beep-trim)
+          (format t "  [record] A/V sync (~:[duration estimate~;clapperboard beep~]): ~
+                     trim ~,2Fs webcam / audio ~:[trim ~;delay ~]~,2Fs~
+                     ~:[~; (~,2Fs --audio-offset later)~]~%"
+                  beep-trim webcam-lead (< audio-lead 0.0) (abs audio-lead)
+                  (not (zerop audio-offset)) (float audio-offset 1.0)))
         (when camera-log
           (%write-camera-log camera-log timeline nout fps src-time))
         ;; source frames come from the compressed intermediate (decoded forward)
@@ -587,6 +631,7 @@ without an over-large file."
                     :cursor-size cursor-size
                     :bg-image bg-image :bg-blur bg-blur
                     :clicks clicks :ripple-color ripple-color
+                    :ripple-intensity ripple-intensity
                     :webcam-fn webcam-fn :webcam-dims (when webcam (cons ww wh))
                     :webcam-pos webcam-pos :webcam-size webcam-size
                     :webcam-corner webcam-corner
@@ -648,10 +693,18 @@ recording plist."
       (loop for n from countdown downto 1
             do (%beep :freq 880)
                (format t "  [capture] recording in ~D...~%" n) (finish-output) (sleep 1))
-      (%beep :freq 1320 :dur 0.2))
+      ;; The 'go' tone: when audio is on it doubles as the A/V sync clapperboard and
+      ;; is played by RECORD-FRAMES *after* the recorder is live (so it lands in the
+      ;; audio); with no audio there's nothing to sync, so just play it here as a cue.
+      (unless audio (%beep :freq audio:*sync-beep-freq* :dur 0.2)))
     (let* ((done nil)
-           ;; evdev click capture runs alongside the frame capture; base ~ capture
-           ;; start so click times align with the frame timeline.
+           ;; The frame clock (internal-real-time) sampled at the instant click
+           ;; capture starts. capture-click-times bases its times on the WALL clock
+           ;; taken right here, but the frame timeline starts later, at RECORD-START
+           ;; (when the first PipeWire frame arrives). We record this reference so the
+           ;; clicks can be rebased onto the frame timeline; without it they lead the
+           ;; picture by the capture-startup latency and ripples fire late (g9f/wyo).
+           (click-clock0 (get-internal-real-time))
            (join (when capture-clicks
                    (ignore-errors (evdev:capture-click-times (lambda () done)))))
            ;; Continuous pointer motion via libinput -- fused with the (gappy)
@@ -662,9 +715,15 @@ recording plist."
            ;; Live webcam (green-screen-asp): a parallel v4l2 recorder over the same
            ;; window, started here so it aligns with frame capture (past the
            ;; countdown), best-effort like audio.
+           (wc-launch (when webcam (get-internal-real-time)))   ; frame clock at launch
            (wc-handle (when webcam (wc:start-webcam dir webcam :fps (max fps 30))))
            (rec  (pw:record-frames fd node :duration duration :max-fps (max fps 30)
-                                   :dir dir :audio audio))
+                                   :dir dir :audio audio
+                                   ;; when recording audio, the 'go' tone is the sync
+                                   ;; clapperboard -- played once the recorder is live.
+                                   :sync-beep-fn (when audio
+                                                   (lambda () (%beep :freq audio:*sync-beep-freq*
+                                                                     :dur 0.2)))))
            (dirty nil))
       (setf done t)
       ;; Store the pointer-motion track (times made relative to the first frame so
@@ -683,7 +742,31 @@ recording plist."
                     (length motion)))))
       ;; Finalize the webcam clip and store its path so render composites it as PiP.
       (when wc-handle
-        (let ((path (ignore-errors (wc:stop-webcam wc-handle))))
+        (let* ((wc-stop (get-internal-real-time))
+               (path (ignore-errors (wc:stop-webcam wc-handle))))
+          (when path
+            ;; Webcam PiP alignment (green-screen-9z2): the render shows, at output
+            ;; time 0, the webcam frame at webcam-local time :WEBCAM-LEAD -- i.e. the
+            ;; webcam's pre-roll before the first screen frame. Compute it from the
+            ;; clocks, NOT from %source-lead (duration - span): the webcam keeps
+            ;; recording a TAIL after the screen stops, and duration - span folds
+            ;; that tail into the front trim, pushing the PiP out of sync. The
+            ;; webcam runs [first-frame .. wc-stop]; the part at/after the first
+            ;; screen frame is (wc-stop - record-start), so the pre-roll is the
+            ;; duration minus that overlap -- tail-free.
+            (let* ((rs    (getf rec :record-start))
+                   (units (float (or (getf rec :time-units) 1000000) 1.0d0))
+                   (dur   (ignore-errors (%media-duration path)))
+                   (after (when rs (/ (float (- wc-stop rs) 1.0) units))))
+              (when (and dur after)
+                (let ((lead (max 0.0 (- dur after))))
+                  (setf (getf rec :webcam-lead) lead dirty t)
+                  (format t "  [webcam-sync] pre-roll ~,2Fs (launch->firstframe ~,2Fs, ~
+                             tail ~,2Fs, dur ~,2Fs)~%"
+                          lead
+                          (if wc-launch (/ (float (- rs wc-launch) 1.0) units) 0.0)
+                          (max 0.0 (- after (or (getf (car (last (getf rec :frames))) :time) after)))
+                          dur)))))
           (when path
             (setf (getf rec :webcam) path dirty t)
             ;; Persist the preview's framing so a later render reproduces it.
@@ -695,7 +778,18 @@ recording plist."
       (when join
         (let ((cts (ignore-errors (funcall join))))
           (when cts
-            (setf (getf rec :click-times) cts dirty t)
+            ;; Rebase click times (wall-clock, based at CLICK-CLOCK0) onto the frame
+            ;; timeline (based at RECORD-START, the first frame). The offset is the
+            ;; capture-startup latency = seconds between the two references; both are
+            ;; GET-INTERNAL-REAL-TIME / wall reads that advance at real-time rate, so
+            ;; subtracting it lands each click where it actually happened (g9f/wyo).
+            (let* ((t0     (getf rec :record-start))
+                   (offset (if t0 (/ (float (- t0 click-clock0) 1.0)
+                                     internal-time-units-per-second)
+                               0.0)))
+              (setf (getf rec :click-times)
+                    (mapcar (lambda (c) (max 0.0 (- (float c 1.0) offset))) cts)
+                    dirty t))
             (format t "  [capture] recorded ~D click(s) for ripples~%" (length cts)))))
       ;; Re-persist the manifest once if we spliced in anything RECORD-FRAMES
       ;; didn't know at write time (clicks and/or webcam).
@@ -712,6 +806,7 @@ recording plist."
                                   (bg-image nil)
                                   (bg-blur nil)
                                   (ripples t)
+                                  (ripple-intensity 1.6)
                                   (aspect nil)
                                   (region nil)
                                   (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
@@ -723,6 +818,11 @@ recording plist."
                                   (cursor-omega-fast dir:*cursor-omega-fast*)
                                   (cursor-anticipate dir:*cursor-anticipate*)
                                   (camera-smoothing dir:*camera-cursor-tau*)
+                                  (style nil)   ; :calm (default) | :energetic; long-form forces :calm
+                                  (reduced-motion nil)  ; cuts instead of pans/zooms (a11y)
+                                  (lint nil)            ; print the motion-linter report
+                                  (audio-offset 0.0)    ; A/V sync nudge (s); + = audio later
+                                  (webcam-offset 0.0)   ; webcam PiP nudge (s); + = webcam later
                                   (camera-log nil)
                                   (out "/tmp/takesy-record.mp4"))
   "Direct + composite stages: direct REC via the editorial camera and render its
@@ -738,6 +838,7 @@ different config. Return (values out n-frames)."
   (let ((dir:*cursor-omega-fast* cursor-omega-fast)
         (dir:*cursor-anticipate* cursor-anticipate)
         (dir:*camera-cursor-tau* camera-smoothing)
+        (dir:*reduced-motion* reduced-motion)
         (cursor-image (when cursor (multiple-value-list (load-image-rgba cursor))))
         (bg-image-data (when bg-image (multiple-value-list (load-image-rgba bg-image))))
         ;; Webcam PiP source: an explicit clip/file wins; otherwise fall back to a
@@ -759,8 +860,21 @@ different config. Return (values out n-frames)."
                            (t '(0.0 0.0 1.0 1.0))))
            (session  (recording->session rec crop))
            (damage   (%crop-damage (compute-damage rec) crop))  ; where the screen changed
+           ;; Camera STYLE (akn.2): CALM/tutorial default; long-form forces calm. Then
+           ;; a resolution-aware cap so the tightest shot never enlarges past native
+           ;; pixels (akn.4). Both applied before planning, which reads these tunables.
+           (span0    (float (getf (car (last (getf rec :frames))) :time) 1.0))
            (timeline (progn
+                       (multiple-value-bind (s forced) (dir:resolve-camera-style style span0)
+                         (dir:apply-camera-style s)
+                         (let* ((ch  (float (dir:session-height session) 1.0))
+                                (oh  (min ch (float max-height 1.0)))
+                                (cap (dir:apply-resolution-cap (/ ch (max 1.0 oh)))))
+                           (format t "  [director] style ~(~A~)~:[~; (forced: long-form)~]~
+                                      ~:[~; +reduced-motion~] | detail<=~,2Fx (res headroom ~,2Fx)~%"
+                                   s forced reduced-motion dir:*shot-detail* cap)))
                        (setf (dir:session-damage session) damage)
+                       (when lint (dir:lint-camera-plan session))  ; advisory report (akn.8)
                        (dir:plan-timeline session :bg bg :corner corner
                                           :padding margin)))  ; editorial shot plan
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
@@ -791,10 +905,12 @@ different config. Return (values out n-frames)."
                          :cursor-hotspot cursor-hotspot :cursor-size cursor-size
                          :bg-image bg-image-data :bg-blur bg-blur
                          :clicks (when ripples (getf rec :click-times))
+                         :ripple-intensity ripple-intensity
                          :webcam webcam :webcam-pos webcam-pos :webcam-size webcam-size
                     :webcam-corner webcam-corner
                     :webcam-border webcam-border :webcam-border-color webcam-border-color
                     :webcam-zoom webcam-zoom :webcam-pan-x webcam-pan-x :webcam-pan-y webcam-pan-y
+                         :webcam-offset webcam-offset
                          :time-warp (first warp-info) :out-duration (second warp-info)
                          ;; audio was captured alongside the frames; mux it back in.
                          ;; Idle-trim would desync it -> drop it (synced trim is TODO).
@@ -803,7 +919,8 @@ different config. Return (values out n-frames)."
                                       (format t "  [render] note: --trim-idle drops audio ~
                                                  (synced trim not yet implemented)~%")
                                       nil)
-                                    (getf rec :audio))))))
+                                    (getf rec :audio))
+                         :audio-offset audio-offset))))
 
 (defun render-recording-dir (dir &rest render-args)
   "Load the manifest RECORD-FRAMES persisted under DIR and RENDER-RECORDING it.
@@ -821,6 +938,7 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (bg-image nil)
                            (bg-blur nil)
                            (ripples t)
+                           (ripple-intensity 1.6)
                            (aspect nil)
                            (region nil)
                            (trim-idle nil) (idle-threshold 1.2) (max-idle 0.4)
@@ -833,6 +951,10 @@ different RENDER-ARGS (:bg, :zoom, :fps, ...) as often as you like."
                            (cursor-omega-fast dir:*cursor-omega-fast*)
                            (cursor-anticipate dir:*cursor-anticipate*)
                            (camera-smoothing dir:*camera-cursor-tau*)
+                           (style nil)
+                           (reduced-motion nil)
+                           (audio-offset 0.0)
+                           (webcam-offset 0.0)
                            (camera-log nil)
                            (dir "/tmp/takesy-rec") (out "/tmp/takesy-record.mp4"))
   "Full `takesy record`: CAPTURE-RECORDING then RENDER-RECORDING in one shot --
@@ -850,6 +972,8 @@ Return (values out n-frames)."
     (render-recording rec :fps fps :max-height max-height :bg bg :corner corner :margin margin
                           :cursor cursor :cursor-hotspot cursor-hotspot
                           :cursor-size cursor-size :bg-image bg-image :bg-blur bg-blur :ripples ripples
+                          :ripple-intensity ripple-intensity
+                          :style style :reduced-motion reduced-motion
                           :aspect aspect :region region
                           :webcam (unless live webcam)
                           :trim-idle trim-idle :idle-threshold idle-threshold :max-idle max-idle
@@ -860,5 +984,7 @@ Return (values out n-frames)."
                           :cursor-omega-fast cursor-omega-fast
                           :cursor-anticipate cursor-anticipate
                           :camera-smoothing camera-smoothing
+                          :audio-offset audio-offset
+                          :webcam-offset webcam-offset
                           :camera-log camera-log
                           :out out)))

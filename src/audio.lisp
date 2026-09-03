@@ -13,9 +13,92 @@
 
 (defpackage #:takesy/audio
   (:use #:cl)
-  (:export #:start-audio #:stop-audio #:audio-handle #:audio-handle-path))
+  (:export #:start-audio #:stop-audio #:audio-handle #:audio-handle-path
+           #:*sync-beep-freq* #:detect-sync-beep))
 
 (in-package #:takesy/audio)
+
+;;; ------------------------------------------------------------------
+;;; Sync clapperboard (green-screen-kvi). The count-in plays a short tone AFTER the
+;;; audio recorder is live, so it lands in audio.wav; DETECT-SYNC-BEEP finds its
+;;; onset there. Anchoring to a marker in the ACTUAL recording (not stream
+;;; durations) removes the stop-skew that made audio lead the picture.
+
+(defparameter *sync-beep-freq* 1320
+  "Frequency (Hz) of the count-in 'go' tone, reused as the A/V sync clapperboard.")
+
+(defun %decode-wav-s16-mono (path sr &key (seconds 4.0))
+  "Decode the first SECONDS of PATH to mono signed-16 PCM at SR Hz via ffmpeg;
+return a (simple-array (signed-byte 16)) of samples, or NIL on failure."
+  (let ((tmp (format nil "~A.sync~D.raw" path (random 100000))))
+    (unwind-protect
+         (when (ignore-errors
+                (uiop:run-program
+                 (list "ffmpeg" "-y" "-loglevel" "error" "-t" (format nil "~,3F" seconds)
+                       "-i" (namestring path) "-ac" "1" "-ar" (format nil "~D" sr)
+                       "-f" "s16le" tmp)
+                 :output nil :error-output nil)
+                (probe-file tmp))
+           (with-open-file (s tmp :element-type '(unsigned-byte 8))
+             (let* ((n (floor (file-length s) 2))
+                    (out (make-array n :element-type '(signed-byte 16)))
+                    (buf (make-array (* n 2) :element-type '(unsigned-byte 8))))
+               (read-sequence buf s)
+               (dotimes (i n out)
+                 (let ((v (logior (aref buf (* i 2)) (ash (aref buf (1+ (* i 2))) 8))))
+                   (setf (aref out i) (if (>= v 32768) (- v 65536) v)))))))
+      (ignore-errors (delete-file tmp)))))
+
+(defun %goertzel-energy (samples base win coeff)
+  "Goertzel band power of WIN samples of SAMPLES starting at BASE, for a band whose
+detector COEFF is 2*cos(2*pi*f/sr)."
+  (let ((s0 0.0d0) (s1 0.0d0))
+    (dotimes (i win)
+      (let ((s (+ (* coeff s0) (- s1) (float (aref samples (+ base i)) 1.0d0))))
+        (setf s1 s0 s0 s)))
+    (/ (+ (* s0 s0) (* s1 s1) (- (* coeff s0 s1))) win)))
+
+(defparameter *sync-beep-tonality* 4.0
+  "A hop is TONAL at the beep frequency when its band energy exceeds an off-band
+reference by this factor. A pure tone concentrates energy in its band; broadband
+noise and click transients spread it, so they fail this test (green-screen-kvi).")
+
+(defun detect-sync-beep (path &key (freq *sync-beep-freq*) (search 4.0) (sr 8000))
+  "Onset time (seconds) of the sync beep -- a sustained pure tone at FREQ -- in the
+first SEARCH seconds of the WAV at PATH. Uses two Goertzel bands: FREQ and an
+off-band reference; a hop counts only when FREQ dominates the reference by
+*sync-beep-tonality* AND rises well above the noise floor. The onset is the start of
+the longest such run (>= ~30 ms). Returns NIL when there is no clear tone (audio
+without the count-in), so the caller falls back to the duration estimate."
+  (let ((samples (%decode-wav-s16-mono path sr :seconds search)))
+    (when (and samples (> (length samples) sr))
+      (let* ((win (round (* sr 0.02)))                        ; 20 ms window
+             (hop (round (* sr 0.005)))                       ; 5 ms hop
+             (cf  (* 2.0d0 (cos (* 2.0d0 pi (/ (float freq 1.0d0) sr)))))
+             (rf  (* 2.0d0 (cos (* 2.0d0 pi (/ (float (- freq 400) 1.0d0) sr))))) ; off-band ref
+             (nhops (floor (- (length samples) win) hop))
+             (en  (make-array (max 1 nhops) :element-type 'double-float))
+             (tonal (make-array (max 1 nhops) :element-type 'bit :initial-element 0)))
+        (dotimes (h nhops)
+          (let* ((base (* h hop))
+                 (e (%goertzel-energy samples base win cf))
+                 (r (%goertzel-energy samples base win rf)))
+            (setf (aref en h) e)
+            (when (> e (* *sync-beep-tonality* (max r 1.0d0))) (setf (aref tonal h) 1))))
+        ;; noise floor from the median band energy; a real tone peaks far above it.
+        (let* ((sorted (sort (copy-seq en) #'<))
+               (median (aref sorted (floor (length sorted) 2)))
+               (floor* (* 12.0d0 (max median 1.0d0)))
+               (min-hops (max 1 (round (/ 0.03 (/ hop (float sr 1.0))))))
+               (best-len 0) (best-start -1) (run 0) (run-start 0))
+          (dotimes (h nhops)
+            (cond ((and (= (aref tonal h) 1) (> (aref en h) floor*))
+                   (when (zerop run) (setf run-start h))
+                   (incf run)
+                   (when (> run best-len) (setf best-len run best-start run-start)))
+                  (t (setf run 0))))
+          (when (>= best-len min-hops)
+            (* best-start hop (/ 1.0 sr))))))))
 
 (defun %pactl (subcommand)
   "Run `pactl SUBCOMMAND` and return its trimmed one-line output, or NIL on any

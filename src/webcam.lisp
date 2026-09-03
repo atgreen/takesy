@@ -81,11 +81,51 @@ often stuck at a low resolution). Bounded probe; NIL on error/timeout."
            (and (search "mjpeg" (string-downcase out)) t)))
      (sb-ext:timeout () nil))))
 
+(defun %v4l2-list-formats (dev)
+  "Raw `ffmpeg -list_formats all` output for DEV (bounded probe), or \"\" on
+error/timeout. The MJPEG line lists the supported sizes, e.g.
+  ... mjpeg : Motion-JPEG : 1280x720 640x480 1920x1080 2592x1944"
+  (or (ignore-errors
+       (handler-case
+           (sb-ext:with-timeout 4
+             (with-output-to-string (s)
+               (uiop:run-program (list "ffmpeg" "-hide_banner" "-f" "v4l2"
+                                       "-list_formats" "all" "-i" dev)
+                                 :output nil :error-output s :ignore-error-status t)))
+         (sb-ext:timeout () "")))
+      ""))
+
+(defun %parse-mjpeg-sizes (out)
+  "WxH tokens on the MJPEG line of OUT as (w . h) pairs, largest area first."
+  (let ((line (find-if (lambda (l) (search "mjpeg" (string-downcase l)))
+                       (uiop:split-string out :separator '(#\Newline))))
+        (sizes '()))
+    (when line
+      (dolist (tok (uiop:split-string line :separator '(#\Space #\Tab #\Return)))
+        (let ((x (position #\x tok)))
+          (when x
+            (let ((w (parse-integer tok :end x :junk-allowed t))
+                  (h (parse-integer tok :start (1+ x) :junk-allowed t)))
+              (when (and w h (plusp w) (plusp h))
+                (pushnew (cons w h) sizes :test #'equal)))))))
+    (sort sizes #'> :key (lambda (wh) (* (car wh) (cdr wh))))))
+
+(defun %best-mjpeg-size (sizes &key (max-w 1920) (max-h 1080))
+  "Largest SIZE within MAX-W x MAX-H, or NIL. Capped at 1080p: bigger MJPEG modes
+strain USB bandwidth and CPU and are wasted on a small picture-in-picture inset."
+  (find-if (lambda (wh) (and (<= (car wh) max-w) (<= (cdr wh) max-h))) sizes))
+
 (defun v4l2-input-args (dev)
-  "ffmpeg input options for capturing DEV: prefer MJPEG (full framerate on USB
-cameras) when the device supports it, else the driver default (raw). Goes before
-the -i on an ffmpeg v4l2 command line."
-  (when (supports-mjpeg-p dev) (list "-input_format" "mjpeg")))
+  "ffmpeg input options for capturing DEV: prefer MJPEG at the best resolution up
+to 1080p -- full framerate on USB cameras, and far sharper than the ~640x480 the
+driver hands out by default -- else the driver default (raw). Goes before the -i
+on an ffmpeg v4l2 command line."
+  (let ((formats (%v4l2-list-formats dev)))
+    (when (search "mjpeg" (string-downcase formats))
+      (append (list "-input_format" "mjpeg")
+              (let ((size (%best-mjpeg-size (%parse-mjpeg-sizes formats))))
+                (when size
+                  (list "-video_size" (format nil "~Dx~D" (car size) (cdr size)))))))))
 
 (defun resolve-device (spec)
   "Resolve a live SPEC to a concrete device path, or NIL. \"auto\" probes
@@ -110,15 +150,30 @@ when no device resolves or ffmpeg won't start."
         (progn
           (format t "  [webcam] no usable capture device for ~S; recording screen only~%" spec)
           nil)
-        (let ((mjpeg (v4l2-input-args dev)))     ; prefer MJPEG for full framerate
+        (let* ((in-args (v4l2-input-args dev))   ; nil unless MJPEG (then incl. -video_size)
+               (mjpeg-p (and in-args t))
+               ;; MJPEG: copy the camera stream verbatim -- no generation loss and
+               ;; no encode CPU during the concurrent 4K screen capture (the render
+               ;; composites + encodes to H.264 once anyway). Without -c:v, ffmpeg
+               ;; would default to mpeg4 and throw away quality. Raw fallback keeps
+               ;; the prior default-codec behaviour.
+               (out-args (if mjpeg-p
+                             (list "-c:v" "copy")
+                             (list "-pix_fmt" "yuv420p"))))
          (handler-case
             (let ((proc (uiop:launch-program
                          (append (list "ffmpeg" "-y" "-loglevel" "error" "-f" "v4l2")
-                                 mjpeg
-                                 (list "-framerate" (format nil "~D" fps) "-i" dev
-                                       "-pix_fmt" "yuv420p" path))
+                                 in-args
+                                 (list "-framerate" (format nil "~D" fps) "-i" dev)
+                                 out-args (list path))
                          :input :stream :output nil :error-output nil)))
-              (format t "  [webcam] recording ~A~:[~; (mjpeg)~] -> ~A~%" dev mjpeg path)
+              (format t "  [webcam] recording ~A ~A -> ~A~%"
+                      dev
+                      (let ((sz (member "-video_size" in-args :test #'string=)))
+                        (cond ((and mjpeg-p sz) (format nil "(mjpeg ~A copy)" (second sz)))
+                              (mjpeg-p "(mjpeg copy)")
+                              (t "(raw)")))
+                      path)
               (make-webcam-handle :proc proc :path path :device dev))
           (error (e)
             (format t "  [webcam] failed to start (~A); recording screen only~%" e)

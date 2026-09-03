@@ -160,6 +160,18 @@ capture-options already carries --webcam (so it isn't declared twice)."
                         :long-name "cursor-size" :key :cursor-size)
    (clingon:make-option :boolean :description "click ripples + cursor press (default on)"
                         :long-name "ripples" :initial-value :true :key :ripples)
+   (clingon:make-option :string :description "click-ripple prominence (1.0 = subtle original, default 1.6; higher = bolder)"
+                        :long-name "ripple-intensity" :initial-value "1.6" :key :ripple-intensity)
+   (clingon:make-option :string :description "camera style: calm (tutorial, default) or energetic (promo); recordings over 5min force calm"
+                        :long-name "style" :initial-value "calm" :key :style)
+   (clingon:make-option :boolean :description "reduced-motion: cut between shots instead of animating pans/zooms (accessibility)"
+                        :long-name "reduced-motion" :initial-value :false :key :reduced-motion)
+   (clingon:make-option :boolean :description "print the motion-linter report (shot reasons + best-practice warnings)"
+                        :long-name "lint" :initial-value :false :key :lint)
+   (clingon:make-option :string :description "A/V sync nudge in seconds (+ pushes audio later to fix audio that leads the video; default 0)"
+                        :long-name "audio-offset" :initial-value "0" :key :audio-offset)
+   (clingon:make-option :string :description "webcam PiP sync nudge in seconds (+ pushes the webcam later to fix a webcam that leads the video; default 0)"
+                        :long-name "webcam-offset" :initial-value "0" :key :webcam-offset)
    (when webcam
      (clingon:make-option :string
                           :description "webcam PiP: a video/image file (or /dev/videoN|auto for live)"
@@ -230,6 +242,14 @@ capture-options already carries --webcam (so it isn't declared twice)."
             :webcam-pan-x      (let ((p (%float (g :webcam-pan-x) 0.0))) (unless (= p 0.0) p))
             :webcam-pan-y      (let ((p (%float (g :webcam-pan-y) 0.0))) (unless (= p 0.0) p))
             :ripples           (%truthy (g :ripples))
+            :ripple-intensity  (%float (g :ripple-intensity) 1.6)
+            :style             (let ((s (string-downcase (or (g :style) "calm"))))
+                                 (cond ((string= s "energetic") :energetic)
+                                       (t :calm)))
+            :reduced-motion    (%truthy (g :reduced-motion))
+            :lint              (%truthy (g :lint))
+            :audio-offset      (%float (g :audio-offset) 0.0)
+            :webcam-offset     (%float (g :webcam-offset) 0.0)
             :aspect            (parse-aspect (g :aspect))
             :region            (parse-region (g :region))
             :trim-idle         (%truthy (g :trim-idle))
