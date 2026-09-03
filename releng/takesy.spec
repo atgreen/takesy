@@ -11,7 +11,7 @@ Version:        0.0.0
 Release:        1%{?dist}
 Summary:        A screen recorder for modern Linux desktops (Wayland & X11)
 
-License:        MIT
+License:        GPL-3.0-or-later
 URL:            https://github.com/atgreen/takesy
 Source0:        %{name}-%{version}.tar.gz
 

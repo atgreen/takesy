@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; webcam.lisp
 ;;;;
 ;;;; Live webcam capture (green-screen-asp). The ScreenCast portal delivers the

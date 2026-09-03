@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; egl.lisp
 ;;;;
 ;;;; Bead green-screen-7k8.1: hand-rolled CFFI bindings for the EGL headless

@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; director.lisp
 ;;;;
 ;;;; Bead green-screen-wtd: the Director -- the post-processing "value-add" that

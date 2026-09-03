@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; pipewire-package.lisp
 ;;;;
 ;;;; Bead green-screen-jme: pure-Lisp CFFI bindings to libpipewire-0.3.

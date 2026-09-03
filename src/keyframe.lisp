@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; keyframe.lisp
 ;;;;
 ;;;; Bead green-screen-7k8.3: the Director keyframe -- the contract between the

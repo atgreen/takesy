@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 # takesy -- a screen recorder for modern Linux desktops (Wayland & X11)
 
 SBCL   ?= sbcl
@@ -32,7 +32,7 @@ OPEN-SOURCE-NOTICES.txt: ocicl.csv
 	@echo "takesy OPEN SOURCE NOTICES" >> $@
 	@echo "================================================================================" >> $@
 	@echo "" >> $@
-	@echo "takesy is licensed under the MIT License." >> $@
+	@echo "takesy is licensed under the GNU General Public License v3.0 or later." >> $@
 	@echo "Copyright (C) 2026 Anthony Green <green@moxielogic.com>" >> $@
 	@echo "" >> $@
 	@echo "It is built with the open source Common Lisp libraries below; their" >> $@

@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; cli.lisp
 ;;;;
 ;;;; The `takesy` command-line entry point, built on clingon. Recording is the
@@ -377,7 +377,7 @@ with neutral framing when there's no display or the user cancels."
    :description "screen recorder for modern Linux desktops (Wayland & X11) with an
 editorial auto-zoom camera. With no sub-command, takesy records your screen."
    :authors '("Anthony Green <green@moxielogic.com>")
-   :license "MIT"
+   :license "GPL-3.0-or-later"
    :options (append (capture-options) (render-options :webcam nil))
    :handler #'handle-record
    :sub-commands (list (capture-command) (render-command) (record-command))))

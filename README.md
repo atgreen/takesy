@@ -1,6 +1,6 @@
 # takesy
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/atgreen/takesy)](https://github.com/atgreen/takesy/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](https://github.com/atgreen/takesy/releases)
 
@@ -187,4 +187,4 @@ split them so one recording can be rendered many ways.
 ## License
 
 Created by [Anthony Green](https://github.com/atgreen); distributed under the
-[MIT license](LICENSE).
+[GNU General Public License v3.0 or later](LICENSE).

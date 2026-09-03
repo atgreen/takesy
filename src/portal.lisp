@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: Copyright (C) 2026 Anthony Green <green@moxielogic.com>
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;;; portal.lisp
 ;;;;
 ;;;; Bead green-screen-am4.3: the xdg-desktop-portal ScreenCast handshake as a
