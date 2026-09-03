@@ -4,7 +4,7 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.4.0] - 2026-09-03
 
 ### Added
 
@@ -13,9 +13,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   track is aligned to the picture from a real marker instead of the old
   `audio_duration − video_span` estimate (which over-trimmed and made the audio
   drift). Falls back to the estimate when a capture has no tone.
+- **Sharper webcam.** The camera is captured at its native resolution (largest
+  MJPEG mode up to 1080p, was the ~640×480 driver default) and stored losslessly
+  (`-c:v copy`) instead of re-encoded to mpeg4 — a much crisper picture-in-picture,
+  with less CPU during capture.
 - **`--webcam-offset S`** — signed webcam-PiP sync nudge (`+` pushes the inset
   later), mirroring `--audio-offset`. Normally unneeded; the webcam lead is aligned
   automatically.
+- **`--style calm|energetic`** — camera pacing preset (calm/tutorial default;
+  recordings over 5 min force calm).
+- **`--reduced-motion`** — cut between shots instead of animating pans and zooms
+  (accessibility).
+- **`--lint`** — print the motion-linter report (shot reasons + best-practice
+  warnings).
+- **`--ripple-intensity F`** — tune click-ripple strength and contrast halo.
 
 ### Fixed
 
