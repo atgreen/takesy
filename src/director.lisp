@@ -40,6 +40,7 @@
            #:apply-resolution-cap #:*shot-overview* #:*shot-working* #:*shot-detail*
            #:*reduced-motion* #:lint-camera-plan
            #:*damage-include-radius* #:*damage-anchor*
+           #:*speech-pauses* #:*speech-snap-window*
            #:merge-segments #:schedule-zooms #:plan-timeline))
 
 (in-package #:takesy/director)
@@ -469,6 +470,13 @@ frame doesn't chase a corner twitch when nothing else is happening. 0 = off.")
 (defparameter *evi-window* 1.0
   "Accumulation window (s): evidence is summed over this span so several updates
 resolve into one coherent target instead of reacting per damage frame.")
+(defparameter *evi-damage-window* 2.5
+  "Longer accumulation window (s) JUST for damage regions. A selection/highlight or a
+sweep of edits paints its colour a bit at a time and then STOPS changing frame to
+frame, so within the 1s evidence window each moment is only a thin sliver. Summing
+damage over this longer span gathers the whole swept area into one coherent, strong
+region that persists a beat after the change stops -- making a selection a first-class
+zoom target instead of a trickle (green-screen-fuj).")
 (defparameter *evi-min-evidence* 1.6
   "A region must accumulate at least this much recency-weighted evidence (roughly
 this many recent damage frames) to count -- so SUSTAINED localized activity (e.g.
@@ -565,7 +573,9 @@ when given, are the current shot centre: a click's anticipation lead grows with 
 distance from there so a far click settles before it lands (green-screen-fuj)."
   (let* ((now t1)
          (clicks (or located-clicks (%located-clicks session)))
-         (out (%damage-regions session t0 t1)))
+         ;; Damage accumulates over a LONGER window than clicks/cursor so a selection
+         ;; or edit sweep gathers into one sustained region (green-screen-fuj).
+         (out (%damage-regions session (max 0.0 (- t1 *evi-damage-window*)) t1)))
     ;; clicks: strong, active from LEAD before to HOLD after the click, tested at
     ;; NOW (the window end) so the planner SEES the click coming *lead* early and
     ;; can start moving before it lands (anticipation, guideline 4).
@@ -647,6 +657,10 @@ shot rather than alternated between.")
 the camera may push back in -- much longer than a normal cut so the viewer takes in
 the new page / dialog instead of the camera diving straight back to detail. The
 push-in still also needs a settled target, so this is a floor, not a fixed wait.")
+(defparameter *shot-focused-break-delay* 1.0
+  "Minimum seconds a scene-change wide must hold before a FOCUSED click may break it
+early. A focused click (highlighting code) should still cut the linger short, but not
+so instantly that a reveal blinks out-and-back in a fraction of a second (fuj).")
 (defparameter *shot-move-eps* 0.14
   "Centre must shift more than this (UV, sum-of-axes) to count as a real reframe.")
 (defparameter *shot-dead-zone* 0.7
@@ -1036,6 +1050,22 @@ covering >= AREA of the frame in the same window. A deliberate, view-scale chang
                  (and (<= t0 dt t1) (>= (* (- x1 x0) (- y1 y0)) area))))
              (session-damage session))))
 
+(defparameter *reveal-burst-count* 3
+  "This many large repaints (each >= *reveal-area*) inside the burst window reads as
+CONTENT IN MOTION -- scrolling, an animation, a live-updating page -- rather than a
+single navigation. The camera then HOLDS its current shot instead of revealing: the
+content is already moving, so adding camera motion would just double it. One isolated
+big repaint stays a navigation reveal (green-screen-fuj).")
+
+(defun %repaint-burst-p (session t0 t1)
+  "T when at least *reveal-burst-count* large repaints fall in [T0,T1] -- a run of
+big frame changes that means the content itself is moving, not a discrete nav."
+  (>= (count-if (lambda (d)
+                  (destructuring-bind (dt x0 y0 x1 y1) d
+                    (and (<= t0 dt t1) (>= (* (- x1 x0) (- y1 y0)) *reveal-area*))))
+                (session-damage session))
+      *reveal-burst-count*))
+
 (defun plan-shots (session &key (window *evi-window*))
   "Walk the recording and emit a sparse list of SHOTs. Evidence-driven, with
 establish-first, cooldown, hysteresis, frame-both, reveal, and idle-widen."
@@ -1099,6 +1129,12 @@ establish-first, cooldown, hysteresis, frame-both, reveal, and idle-widen."
             (cond
               ;; scrolling: hold the viewport steady, do not react (G8/G11).
               ((%scrolling-p session (max 0.0 (- tm window)) tm) nil)
+              ;; content in motion (scrolling / animation / dynamic page): repeated
+              ;; big repaints in a row -- HOLD the current shot (don't reveal wide or
+              ;; chase), so scrolling while zoomed keeps reading at that zoom. Distinct
+              ;; from a SINGLE isolated repaint, which is a navigation and still reveals.
+              ;; Looks ahead so it holds from the first frame of the burst (fuj).
+              ((%repaint-burst-p session (max 0.0 (- tm 2.0)) (+ tm 4.0)) nil)
               ;; click-driven page-scale repaint (browser navigation, a full panel):
               ;; the whole view changed on purpose -- reveal it WIDE and never punch
               ;; into the click. Fires from Overview too (re-holds wide, so the
@@ -1187,9 +1223,22 @@ establish-first, cooldown, hysteresis, frame-both, reveal, and idle-widen."
                      (cond
                        ;; establish-first: from Overview, push in once we've held
                        ;; the establishing shot long enough and the target settled.
+                       ;; Exception: a FOCUSED click target (a dwelled click that is
+                       ;; not itself a page-repaint -- e.g. highlighting code) breaks a
+                       ;; scene-change linger early, so intentional localized work zooms
+                       ;; in instead of being stranded wide by the establish-hold. Ambient
+                       ;; damage still waits out the linger (green-screen-fuj).
                        ((eq cur-kind :overview)
-                        (when (and held dwelled (>= tm *shot-establish*))
-                          (switch tm kind ncx ncy z nil :push-in)))
+                        (let ((focused-click
+                                (and (eq (cand-kind primary) :click)
+                                     ;; don't instantly break a just-opened wide -- that
+                                     ;; made a scene-change reveal blink out-and-back in a
+                                     ;; fraction of a second; give it a beat first (fuj).
+                                     (>= (- tm last-move) *shot-focused-break-delay*)
+                                     (not (%click-repaint-p session (max 0.0 (- tm window))
+                                                            (+ tm *reveal-repaint-lookahead*) clicks)))))
+                          (when (and (or held focused-click) dwelled (>= tm *shot-establish*))
+                            (switch tm kind ncx ncy z nil :push-in))))
                        ;; already close: move only past the cooldown and when the new
                        ;; target clearly beats what's holding the current frame -- AND
                        ;; only when the target isn't already comfortably in frame.
@@ -1203,11 +1252,13 @@ establish-first, cooldown, hysteresis, frame-both, reveal, and idle-widen."
                                (moved (> (+ (abs (- ncx cur-cx)) (abs (- ncy cur-cy)))
                                          *shot-move-eps*))
                                (resized (not (eq kind cur-kind)))
-                               ;; hold when the target is in-frame and no zoom change is
-                               ;; needed -- a pure pan to chase a still-visible subject is
-                               ;; exactly the restlessness to avoid; a zoom change (make
-                               ;; legible) is still allowed.
-                               (pan-only-in-frame (and in-frame (not resized))))
+                               ;; hold when the target is already comfortably in frame --
+                               ;; a pan to chase a still-visible subject, OR a minor
+                               ;; zoom-bucket flip (Detail<->Working) on the same spot, is
+                               ;; exactly the restlessness to avoid: a whole local task
+                               ;; should play in ONE stable shot. Only a target that has
+                               ;; LEFT the dead zone earns a move (green-screen-fuj).
+                               (pan-only-in-frame in-frame))
                           (when (and held dwelled (or moved resized) (not pan-only-in-frame)
                                      (>= (cand-strength primary)
                                          (* *shot-hysteresis* (max ret 0.15))))
@@ -1382,13 +1433,53 @@ still. Long tight->tight jumps route through Overview (widen-then-push-in)."
       (push (frame 0.0 1.0 0.5 0.5) kfs)
       (%clean-timeline kfs))))
 
+(defparameter *speech-pauses* nil
+  "When set (by the render, from the recorded narration), a list of (START . END)
+speech-pause intervals in SESSION time. The planner then lands camera moves inside
+these pauses instead of mid-sentence -- editors cut on the breath, not the word
+(green-screen-fuj). NIL disables it (no audio, or a silent screencast).")
+(defparameter *speech-snap-window* 0.8
+  "Max seconds a move may be nudged to reach a speech pause. Beyond this the move
+happens on time -- better a move mid-speech than one that drifts far from its cause.")
+
+(defun %in-pause (tm pauses)
+  (some (lambda (p) (<= (car p) tm (cdr p))) pauses))
+
+(defun %snap-to-pause (tm pauses window)
+  "Time to move TM to so it lands in a pause within WINDOW: TM itself if already in a
+pause, else the nearest point of the nearest pause within WINDOW, else NIL."
+  (if (%in-pause tm pauses) tm
+      (let ((best nil) (bestd window))
+        (dolist (p pauses best)
+          (let* ((c (min (cdr p) (max (car p) tm)))     ; clamp TM into the interval
+                 (d (abs (- c tm))))
+            (when (< d bestd) (setf bestd d best c)))))))
+
+(defun %snap-shots-to-pauses (shots pauses &key (window *speech-snap-window*))
+  "Nudge each shot's start (a camera move) to land in a nearby speech pause. Clamped
+so no shot crosses its neighbours or drops below a readable minimum length."
+  (if (or (null pauses) (< (length shots) 2)) shots
+      (let ((v (coerce shots 'vector)))
+        (loop for i from 1 below (length v)
+              for prev = (aref v (1- i)) for s = (aref v i)
+              for np = (%snap-to-pause (shot-t0 s) pauses window)
+              when (and np (/= np (shot-t0 s)))
+                do (let ((nt (min (- (shot-t1 s) 0.3)          ; keep this shot >= 0.3s
+                                  (max (+ (shot-t0 prev) 0.3)  ; keep prev >= 0.3s
+                                       np))))
+                     (setf (shot-t1 prev) nt (shot-t0 s) nt)))
+        (coerce v 'list))))
+
 (defun plan-editor-timeline (session &key (padding 0.04) (corner 0.09)
                                           (shadow-blur 0.03) (shadow-alpha 0.5)
                                           (bg '(0.11 0.12 0.15)))
-  "Editor model (Phase 2): evidence -> sparse shot list -> keyframes."
-  (shots->keyframes session (plan-shots session)
-                    :padding padding :corner corner
-                    :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg))
+  "Editor model (Phase 2): evidence -> sparse shot list -> keyframes. When
+*SPEECH-PAUSES* is set, moves are nudged onto speech pauses first."
+  (let ((shots (plan-shots session)))
+    (when *speech-pauses* (setf shots (%snap-shots-to-pauses shots *speech-pauses*)))
+    (shots->keyframes session shots
+                      :padding padding :corner corner
+                      :shadow-blur shadow-blur :shadow-alpha shadow-alpha :bg bg)))
 
 (defun plan-timeline (session &key (activity :auto) (gap *activity-gap*)
                                    (zoom *zoom-level*) (zoom-min *zoom-min*)

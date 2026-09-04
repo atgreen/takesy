@@ -4,6 +4,34 @@ All notable changes to takesy are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-09-03
+
+### Changed
+
+- **`--webcam` is now a flag, not an option.** The camera and framing are chosen in
+  the preview that opens before recording, so `--webcam` takes no argument.
+  **Breaking:** `--webcam auto` / `--webcam /dev/videoN` are no longer accepted on
+  record/capture. (For `takesy render`, `--webcam FILE` still composites a
+  pre-recorded clip.)
+- **More director tuning, from real terminal + browser screencasts:**
+  - **Selections are a first-class zoom trigger** — highlighting code (or any color
+    change) now gathers into one sustained region and zooms in, instead of trickling
+    away as thin per-frame damage.
+  - **Reveals for big new content** — a dialog/menu, or a click that repaints much of
+    the screen (browser navigation), widens to show the whole thing; a *focused*
+    click (like a highlight) can break that linger to zoom into the work.
+  - **Holds through motion** — scrolling / animation / live-updating content (a run
+    of big repaints) holds the current shot instead of chasing; the camera also holds
+    a zoomed shot through in-frame activity rather than bouncing on minor zoom flips.
+  - **Scene-change wides linger** before the camera dives back to detail.
+
+### Added
+
+- **`--speech-aware`** (default on): when narration is recorded, camera moves are
+  nudged onto speech pauses — cut on the breath, not mid-sentence.
+- **`--damage-anchor reading|center`**: reading-anchored framing keeps the left
+  column / line-starts and context above in view instead of centering on the change.
+
 ## [1.5.0] - 2026-09-03
 
 ### Changed

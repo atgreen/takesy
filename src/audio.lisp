@@ -14,7 +14,7 @@
 (defpackage #:takesy/audio
   (:use #:cl)
   (:export #:start-audio #:stop-audio #:audio-handle #:audio-handle-path
-           #:*sync-beep-freq* #:detect-sync-beep))
+           #:*sync-beep-freq* #:detect-sync-beep #:speech-pauses))
 
 (in-package #:takesy/audio)
 
@@ -99,6 +99,40 @@ without the count-in), so the caller falls back to the duration estimate."
                   (t (setf run 0))))
           (when (>= best-len min-hops)
             (* best-start hop (/ 1.0 sr))))))))
+
+(defun speech-pauses (path &key (sr 16000) (frame 0.03) (min-pause 0.4)
+                                (seconds 100000.0))
+  "Return a list of (START . END) pause intervals (seconds, in the WAV's own
+timebase) in the speech audio at PATH -- runs of low-energy audio at least MIN-PAUSE
+long, with the energy floor derived from the clip's own quiet level. NIL on failure.
+Used to land camera moves on speech pauses instead of mid-sentence (green-screen-fuj)."
+  (let ((samples (%decode-wav-s16-mono path sr :seconds seconds)))
+    (when (and samples (> (length samples) sr))
+      (let* ((fn (max 1 (round (* frame sr))))            ; samples per frame
+             (nf (floor (length samples) fn))
+             (energies (make-array nf :element-type 'double-float)))
+        (dotimes (i nf)                                   ; RMS energy per frame
+          (let ((sum 0.0d0) (base (* i fn)))
+            (dotimes (j fn)
+              (let ((v (float (aref samples (+ base j)) 1.0d0)))
+                (incf sum (* v v))))
+            (setf (aref energies i) (sqrt (/ sum fn)))))
+        ;; floor = a low percentile of frame energies, lifted -- adapts to the clip's
+        ;; own noise level so it works for quiet and loud recordings alike.
+        (let* ((sorted (sort (copy-seq energies) #'<))
+               (floor* (* 2.5d0 (max 1.0d0 (aref sorted (floor (* 0.2 nf))))))
+               (pauses '()) (run nil))
+          (flet ((close-run (i)
+                   (when run
+                     (let ((s (* run frame)) (e (* i frame)))
+                       (when (>= (- e s) min-pause) (push (cons s e) pauses)))
+                     (setf run nil))))
+            (dotimes (i nf)
+              (if (< (aref energies i) floor*)
+                  (unless run (setf run i))
+                  (close-run i)))
+            (close-run nf))
+          (nreverse pauses))))))
 
 (defun %pactl (subcommand)
   "Run `pactl SUBCOMMAND` and return its trimmed one-line output, or NIL on any

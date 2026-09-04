@@ -819,6 +819,7 @@ recording plist."
                                   (cursor-anticipate dir:*cursor-anticipate*)
                                   (camera-smoothing dir:*camera-cursor-tau*)
                                   (damage-anchor dir:*damage-anchor*) ; :reading | :center (green-screen-pxi)
+                                  (speech-aware t)     ; land camera moves on speech pauses (green-screen-fuj)
                                   (style nil)   ; :calm (default) | :energetic; long-form forces :calm
                                   (reduced-motion nil)  ; cuts instead of pans/zooms (a11y)
                                   (lint nil)            ; print the motion-linter report
@@ -866,7 +867,19 @@ different config. Return (values out n-frames)."
            ;; a resolution-aware cap so the tightest shot never enlarges past native
            ;; pixels (akn.4). Both applied before planning, which reads these tunables.
            (span0    (float (getf (car (last (getf rec :frames))) :time) 1.0))
+           ;; Speech pauses in SESSION time: the recorded narration's pause intervals
+           ;; shifted by the audio lead (how far the audio leads the picture), so the
+           ;; planner can land moves on breaths not mid-sentence (green-screen-fuj).
+           (spause   (when (and speech-aware (getf rec :audio))
+                       (let ((alead (or (ignore-errors (%beep-sync-trim rec (getf rec :audio)))
+                                        (%source-lead (getf rec :audio) span0) 0.0)))
+                         (loop for (s . e) in (ignore-errors (audio:speech-pauses (getf rec :audio)))
+                               for ve = (- e alead)
+                               when (> ve 0.05) collect (cons (max 0.0 (- s alead)) ve)))))
            (timeline (progn
+                       (when spause
+                         (format t "  [director] speech-aware: ~D pause(s) -- moves land on breaths~%"
+                                 (length spause)))
                        (multiple-value-bind (s forced) (dir:resolve-camera-style style span0)
                          (dir:apply-camera-style s)
                          (let* ((ch  (float (dir:session-height session) 1.0))
@@ -877,8 +890,9 @@ different config. Return (values out n-frames)."
                                    s forced reduced-motion dir:*shot-detail* cap)))
                        (setf (dir:session-damage session) damage)
                        (when lint (dir:lint-camera-plan session))  ; advisory report (akn.8)
-                       (dir:plan-timeline session :bg bg :corner corner
-                                          :padding margin)))  ; editorial shot plan
+                       (let ((dir:*speech-pauses* spause))  ; moves land on speech pauses
+                         (dir:plan-timeline session :bg bg :corner corner
+                                            :padding margin))))  ; editorial shot plan
            ;; eased cursor track (D2 spring) for the overlay -- METADATA hid the
            ;; real cursor, so we draw a smoothed one at the tracked position.
            (eased    (dir:make-session :width (dir:session-width session)

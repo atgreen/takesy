@@ -15,7 +15,7 @@
 
 (in-package #:takesy/cli)
 
-(defparameter *version* "1.5.0"
+(defparameter *version* "1.6.0"
   "takesy version string, surfaced via `takesy --version`.")
 
 ;;; ------------------------------------------------------------------
@@ -121,11 +121,11 @@ mic/microphone -> :mic, both/on/mix -> :both, off/none or absent -> NIL."
                         :long-name "audio" :key :audio)
    (clingon:make-option :integer :description "count down N seconds before recording (0=off)"
                         :long-name "countdown" :initial-value 3 :key :countdown)
-   ;; --webcam doubles as a live-capture trigger: a /dev/video* node or "auto"
-   ;; records the camera during capture; any other path is a pre-recorded PiP clip
-   ;; consumed at render time (handled in render-options for the standalone render).
-   (clingon:make-option :string
-                        :description "webcam PiP: /dev/videoN or auto (live), or a video/image file"
+   ;; --webcam is a plain on/off flag: the camera + framing are chosen in the web
+   ;; preview that opens before recording, so there's no device to name here. (A
+   ;; pre-recorded PiP clip is a render-stage concern -- see render-options.)
+   (clingon:make-option :flag
+                        :description "record a live webcam inset (pick the camera + framing in the preview)"
                         :long-name "webcam" :key :webcam)))
 
 (defun render-options (&key (webcam t))
@@ -171,6 +171,8 @@ capture-options already carries --webcam (so it isn't declared twice)."
                         :long-name "reduced-motion" :initial-value :false :key :reduced-motion)
    (clingon:make-option :boolean :description "print the motion-linter report (shot reasons + best-practice warnings)"
                         :long-name "lint" :initial-value :false :key :lint)
+   (clingon:make-option :boolean :description "when narration is recorded, land camera moves on speech pauses (default on); pass false to disable"
+                        :long-name "speech-aware" :initial-value :true :key :speech-aware)
    (clingon:make-option :string :description "A/V sync nudge in seconds (+ pushes audio later to fix audio that leads the video; default 0)"
                         :long-name "audio-offset" :initial-value "0" :key :audio-offset)
    (clingon:make-option :string :description "webcam PiP sync nudge in seconds (+ pushes the webcam later to fix a webcam that leads the video; default 0)"
@@ -232,8 +234,11 @@ capture-options already carries --webcam (so it isn't declared twice)."
             ;; Only a FILE reaches render as --webcam; a live spec (/dev/videoN|auto)
             ;; is captured during recording and render picks the clip up from the
             ;; manifest, so don't hand render a device path (green-screen-asp).
+            ;; Only a pre-recorded PiP FILE (standalone render) flows to the render
+            ;; stage. In record/capture --webcam is a boolean and the live clip is
+            ;; picked up from the manifest, so it must not leak in as a "path".
             :webcam            (let ((w (g :webcam)))
-                                 (unless (wc:live-spec-p w) w))
+                                 (when (and (stringp w) (not (wc:live-spec-p w))) w))
             :webcam-pos        (parse-webcam-pos (g :webcam-pos))
             :webcam-size       (%float (g :webcam-size) 0.22)
             :webcam-corner     (%float (g :webcam-corner) 1.0)
@@ -253,6 +258,7 @@ capture-options already carries --webcam (so it isn't declared twice)."
             :damage-anchor     (if (string= (string-downcase (or (g :damage-anchor) "reading")) "center")
                                    :center :reading)
             :lint              (%truthy (g :lint))
+            :speech-aware      (%truthy (g :speech-aware))
             :audio-offset      (%float (g :audio-offset) 0.0)
             :webcam-offset     (%float (g :webcam-offset) 0.0)
             :aspect            (parse-aspect (g :aspect))
@@ -299,11 +305,11 @@ with neutral framing when there's no display or the user cancels."
          (fps   (clingon:getopt cmd :fps))
          (dir   (clingon:getopt cmd :dir))
          (audio (parse-audio (clingon:getopt cmd :audio)))
-         (webcam (clingon:getopt cmd :webcam))
-         (live  (and (wc:live-spec-p webcam) webcam))   ; /dev/videoN|auto -> live
+         (webcam (%truthy (clingon:getopt cmd :webcam)))  ; on/off; preview picks device
+         (live  (and webcam "auto"))                       ; live capture; device chosen in preview
          (ra    (%render-args cmd)))
-    (format t "takesy: recording~@[ up to ~Ds~] @ ~Dfps, up to ~Dp tall~@[ +audio(~(~A~))~]~@[ +webcam(~A)~] -> ~A~%"
-            dur fps (getf ra :max-height) audio live (getf ra :out))
+    (format t "takesy: recording~@[ up to ~Ds~] @ ~Dfps, up to ~Dp tall~@[ +audio(~(~A~))~]~:[~; +webcam~] -> ~A~%"
+            dur fps (getf ra :max-height) audio webcam (getf ra :out))
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish; the cursor hides~%~
                  during capture (auto-zoom needs it) and is restored on exit.~%")
@@ -323,14 +329,10 @@ with neutral framing when there's no display or the user cancels."
          (fps   (clingon:getopt cmd :fps))
          (dir   (clingon:getopt cmd :dir))
          (audio (parse-audio (clingon:getopt cmd :audio)))
-         (webcam (clingon:getopt cmd :webcam))
-         (live  (and (wc:live-spec-p webcam) webcam)))
-    (when (and webcam (not live))
-      (format t "  [capture] note: --webcam ~S is a file, not a live device -- capture~%~
-                   only records live cameras (/dev/videoN or auto). Pass the file at~%~
-                   render time instead: takesy render ~A --webcam ~A~%" webcam dir webcam))
-    (format t "takesy: capturing~@[ up to ~Ds~] @ ~Dfps~@[ +audio(~(~A~))~]~@[ +webcam(~A)~] -> ~A~%"
-            dur fps audio live dir)
+         (webcam (%truthy (clingon:getopt cmd :webcam)))  ; on/off; preview picks device
+         (live  (and webcam "auto")))                      ; live capture; device chosen in preview
+    (format t "takesy: capturing~@[ up to ~Ds~] @ ~Dfps~@[ +audio(~(~A~))~]~:[~; +webcam~] -> ~A~%"
+            dur fps audio webcam dir)
     (format t "  a screen-share dialog will appear -- pick a source.~%~
                  click GNOME's Stop button (top bar) to finish.~%")
     (multiple-value-bind (dev z px py) (%maybe-preview live)

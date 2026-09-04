@@ -26,8 +26,8 @@ into a finished mp4. You just record; takesy directs the shot.
 - **Custom cursor** — draw your own cursor image instead of the built-in arrow.
 - **Click ripples** — expanding rings on click, with a subtle cursor press animation.
 - **Trim idle time** — cut dead stretches (no screen change) to tighten long demos.
-- **Webcam inset** — record your camera live during capture (`--webcam /dev/video0`
-  or `--webcam auto`), or composite a pre-recorded clip, as a picture-in-picture —
+- **Webcam inset** — record your camera live during capture (`--webcam`; the camera
+  is chosen in the preview), or composite a pre-recorded clip, as a picture-in-picture —
   its corner radius sweeps from circle through rounded to square, with configurable
   border width and colour.
 - **Webcam framing preview** — whenever you record a live webcam, takesy first
@@ -97,7 +97,7 @@ make install        # copies takesy to ~/.local/bin
 takesy                                 # record; click Stop in the top bar to finish
 takesy --output talk.mp4 --duration 20
 takesy --audio both                    # record desktop sound + mic too
-takesy --webcam auto                   # picture-in-picture from your webcam (live)
+takesy --webcam                        # picture-in-picture from your webcam (pick it in the preview)
 takesy --cursor arrow.png              # use a custom cursor image
 takesy --bg-image wallpaper.png        # put an image behind the inset
 takesy --output demo.gif               # straight to an animated GIF (no audio)
@@ -135,7 +135,7 @@ auto-zoom and compositing over it, honouring all the options below.
 | `--region X,Y,W,H` | frame a fixed screen region (source pixels) instead of auto-cropping to content | auto-crop |
 | `--trim-idle` | cut idle stretches (no screen change) longer than `--idle-threshold` down to `--max-idle` seconds; tightens long demos (drops audio for now) | off |
 | `--ripples on\|off` | expanding ring on each click, with a subtle cursor press animation | `on` |
-| `--webcam SRC` | webcam inset: `SRC` = `/dev/videoN` or `auto` records the camera **live** during capture; any other path is a pre-recorded video/image | — |
+| `--webcam` | record a **live** webcam inset — the camera and framing are chosen in the preview that opens before recording (no device to name). For `takesy render`, `--webcam FILE` instead composites a pre-recorded video/image | off |
 | `--webcam-corner F` | inset corner radius, fraction of half-size: `1` = circle, `0` = square, between = rounded | `1` |
 | `--webcam-border F` | inset border width, fraction of the inset (`0` = none) | `0.012` |
 | `--webcam-border-color C` | inset border colour — a name or `#RRGGBB` | `white` |
@@ -170,6 +170,7 @@ Cursor feel and how much the camera reacts to the pointer are tunable:
 | `--cursor-anticipate S` | seconds before a click to start aiming the cursor straight at it | `0.15` |
 | `--camera-smoothing S` | smooth hand tremor out of the auto-zoom camera, seconds (`0` = off) | `0.15` |
 | `--damage-anchor MODE` | how the camera frames screen activity: `reading` keeps the left column / top context in view; `center` centres on the change | `reading` |
+| `--speech-aware` | when narration is recorded, land camera moves on speech pauses (cut on the breath, not mid-sentence) | on |
 
 ## How it works
 
